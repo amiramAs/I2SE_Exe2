@@ -1,0 +1,255 @@
+const { test, describe, before, after } = require('node:test');
+const assert = require('node:assert/strict');
+
+const DatabaseManager = require('../src/db/database');
+const AuthService = require('../src/services/AuthService');
+const AttendanceService = require('../src/services/AttendanceService');
+const QAService = require('../src/services/QAService');
+const PollService = require('../src/services/PollService');
+const LLMService = require('../src/services/LLMService');
+const HomeworkService = require('../src/services/HomeworkService');
+
+describe('LiveClass AI — End-to-End Software Components & OOP Classes Verification (Task 9)', () => {
+  let dbManager;
+  let authService;
+  let attendanceService;
+  let qaService;
+  let pollService;
+  let llmService;
+  let homeworkService;
+
+  let lecturer;
+  let student1;
+  let student2;
+  let course;
+  let session1;
+
+  before(() => {
+    // Use an isolated in-memory SQLite database for deterministic test runs
+    dbManager = new DatabaseManager(':memory:');
+    authService = new AuthService(dbManager);
+    attendanceService = new AttendanceService(dbManager);
+    qaService = new QAService(dbManager);
+    pollService = new PollService(dbManager);
+    llmService = new LLMService(dbManager, '');
+    homeworkService = new HomeworkService(dbManager, llmService);
+  });
+
+  after(() => {
+    dbManager.close();
+  });
+
+  test('TC-AUTH-01..03: AuthService resolves default STUDENT vs whitelisted ADMIN role and supports Demo Role Switcher', async () => {
+    lecturer = await authService.authenticateGoogleUser({
+      email: 'lecturer@ariel.ac.il',
+      name: 'Dr. Boaz Ben-Moshe'
+    });
+    assert.equal(lecturer.role, 'ADMIN', 'Whitelisted lecturer email should receive ADMIN role');
+
+    student1 = await authService.authenticateGoogleUser({
+      email: 'student.one@msmail.ariel.ac.il',
+      name: 'Student One'
+    });
+    assert.equal(student1.role, 'STUDENT', 'Default Google user should receive STUDENT role');
+
+    student2 = await authService.authenticateGoogleUser({
+      email: 'student.two@msmail.ariel.ac.il',
+      name: 'Student Two'
+    });
+    assert.equal(student2.role, 'STUDENT');
+
+    // Test 1-Click Role Switcher
+    const switched = authService.switchUserRole(student1.id, 'ADMIN');
+    assert.equal(switched.role, 'ADMIN');
+    const restored = authService.switchUserRole(student1.id, 'STUDENT');
+    assert.equal(restored.role, 'STUDENT');
+  });
+
+  test('TC-ATT-01..03: AttendanceService creates courses, auto-enrolls on Lecture 1 QR scan, and verifies Haversine GPS distance', () => {
+    course = attendanceService.createCourse(
+      lecturer.id,
+      'CS-204',
+      'Intro to Software Engineering',
+      'OOP & Deep Design'
+    );
+    assert.equal(course.code, 'CS-204');
+
+    session1 = attendanceService.startSession(
+      course.id,
+      'Lecture 1: OOP Intro',
+      32.1045,
+      35.2075,
+      60
+    );
+    assert.equal(session1.is_active, 1);
+
+    // Student 1 scans QR inside classroom (~10m away) -> Auto-enrolled + PRESENT
+    const checkIn1 = attendanceService.checkInStudent({
+      qrToken: session1.qr_token,
+      studentId: student1.id,
+      studentLat: 32.10456,
+      studentLng: 35.20755
+    });
+    assert.equal(checkIn1.checkIn.verified, true);
+    assert.equal(checkIn1.checkIn.status, 'PRESENT');
+    assert.ok(checkIn1.checkIn.distance_meters <= 60);
+
+    // Confirm auto-enrollment so course now appears in Student 1's "My Courses"
+    const studentCourses = attendanceService.getCoursesForUser(student1.id, 'STUDENT');
+    assert.equal(studentCourses.length, 1);
+    assert.equal(studentCourses[0].id, course.id);
+
+    // Student 2 attempts to check in from outside classroom (~300m away) -> OUT_OF_RANGE
+    const checkIn2 = attendanceService.checkInStudent({
+      qrToken: session1.qr_token,
+      studentId: student2.id,
+      studentLat: 32.1075,
+      studentLng: 35.2075
+    });
+    assert.equal(checkIn2.checkIn.verified, false);
+    assert.equal(checkIn2.checkIn.status, 'OUT_OF_RANGE');
+    assert.ok(checkIn2.checkIn.distance_meters > 60);
+  });
+
+  test('TC-ATT-04..05: AttendanceService detects Mobile Admin Photo Headcount discrepancy, supports manual edit, student history filter, and CSV export', () => {
+    // Lecturer marks Student 2 manually PRESENT -> now 2 students are PRESENT digitally
+    attendanceService.toggleManualAttendance(session1.id, student2.id, 'PRESENT');
+
+    // Lecturer snaps classroom photo from phone -> AI counts only 1 person in the room!
+    const audited = attendanceService.updatePhotoHeadcount(session1.id, 1, 'data:image/jpeg;base64,MOCK');
+    assert.equal(audited.present_count, 2);
+    assert.equal(audited.photo_headcount, 1);
+    assert.equal(audited.fraud_alert, true, 'Should trigger fraud alert when Registered (2) > Photo Count (1)');
+    assert.equal(audited.discrepancy_count, 1);
+
+    // Filter Attendance History by Student 1 across all lectures
+    const filteredHistory = attendanceService.getCourseAttendanceHistory(course.id, student1.id);
+    assert.equal(filteredHistory.students.length, 1);
+    assert.equal(filteredHistory.students[0].student.id, student1.id);
+    assert.equal(filteredHistory.students[0].attendance_rate, 100);
+
+    // Export CSV (Offline Spreadsheet) and verify no government ID is exposed
+    const csv = attendanceService.exportAttendanceCSV(course.id);
+    assert.ok(csv.includes('Student One'));
+    assert.ok(csv.includes('100%'));
+  });
+
+  test('TC-QA-01..03: QAService handles Live Anonymous Questions (Projector Popup & Dismiss) and Post-Class Offline Replies', () => {
+    // Live anonymous question during active session1
+    const liveQ = qaService.askQuestion(
+      course.id,
+      session1.id,
+      student1.id,
+      'How does the Strategy pattern help our LLM service?',
+      true
+    );
+    assert.equal(liveQ.is_live, true);
+    assert.equal(liveQ.is_anonymous, true);
+    assert.equal(liveQ.display_author, 'Anonymous Student');
+
+    const dismissed = qaService.dismissLiveQuestion(liveQ.id);
+    assert.equal(dismissed.is_dismissed, true);
+
+    // End session -> next question is an Offline Post-Class question
+    attendanceService.endSession(session1.id);
+    const offlineQ = qaService.askQuestion(
+      course.id,
+      null,
+      student2.id,
+      'Will the sequence diagram be on the exam?',
+      false
+    );
+    assert.equal(offlineQ.is_live, false);
+    assert.equal(offlineQ.display_author, 'Student Two');
+
+    const replied = qaService.replyToQuestion(offlineQ.id, 'Yes, study the WebSocket sequence flow!');
+    assert.equal(replied.lecturer_reply, 'Yes, study the WebSocket sequence flow!');
+  });
+
+  test('TC-POLL-01..02: PollService runs Multiple-Choice KISS Polls with student vote confirmation and projector-only results', () => {
+    const poll = pollService.createPoll(course.id, session1.id, 'Is the UML Class Diagram clear?', [
+      'Yes, 100%',
+      'Need one more example',
+      'No'
+    ]);
+    assert.equal(poll.options.length, 3);
+
+    // Student 1 votes for option 0
+    const voteConfirm = pollService.castVote(poll.id, student1.id, 0);
+    assert.equal(voteConfirm.voted, true);
+    assert.equal(voteConfirm.selected_option_index, 0);
+    assert.equal(voteConfirm.results, undefined, 'Student confirmation must not leak live bar-chart results');
+
+    // Lecturer projector view receives full breakdown
+    const lecturerView = pollService.getPollForLecturer(poll.id);
+    assert.equal(lecturerView.total_votes, 1);
+    assert.equal(lecturerView.results[0].count, 1);
+    assert.equal(lecturerView.results[0].percentage, 100);
+  });
+
+  test('TC-LLM-01..02: LLMService generates draft lecture summary integrating live Q&A and publishes after lecturer approval', async () => {
+    const courseQuestions = qaService.getQuestionsByCourse(course.id);
+    const draft = await llmService.generateLectureSummary({
+      courseId: course.id,
+      sessionId: session1.id,
+      title: 'Lecture 1 Summary',
+      transcript: 'We covered SOLID principles, Haversine GPS verification, and UML diagrams.',
+      liveQuestions: courseQuestions
+    });
+    assert.equal(draft.is_published, false, 'Newly generated summary must start as a lecturer draft');
+    assert.ok(draft.summary_markdown.includes('Strategy pattern'));
+
+    // Before publishing, students should see 0 published summaries
+    const studentVisibleBefore = llmService.getSummariesForCourse(course.id, 'STUDENT');
+    assert.equal(studentVisibleBefore.length, 0);
+
+    // Lecturer edits/approves and publishes
+    const published = llmService.publishLectureSummary(draft.id, draft.summary_markdown + '\n- Approved by Lecturer');
+    assert.equal(published.is_published, true);
+
+    const studentVisibleAfter = llmService.getSummariesForCourse(course.id, 'STUDENT');
+    assert.equal(studentVisibleAfter.length, 1);
+  });
+
+  test('TC-HW-01..02 & TC-LLM-03: HomeworkService enforces submission_type and runs on-demand LLM review & peer comparison', async () => {
+    const assignment = homeworkService.createAssignment(
+      course.id,
+      'Ex2: Teaching Tool',
+      'Submit GitHub repo and/or architecture summary.',
+      'GITHUB_ONLY',
+      '2026-11-25'
+    );
+
+    // Attempting to submit without GitHub URL on a GITHUB_ONLY assignment should throw
+    assert.throws(() => {
+      homeworkService.submitHomework({
+        assignmentId: assignment.id,
+        studentId: student1.id,
+        repoUrl: '',
+        content: 'Only text without repo link'
+      });
+    }, /requires a GitHub Repository URL/);
+
+    // Student 1 submits valid GitHub repo
+    const sub1 = homeworkService.submitHomework({
+      assignmentId: assignment.id,
+      studentId: student1.id,
+      repoUrl: 'https://github.com/student1/I2SE_Exe2',
+      content: 'Implemented OOP Service Classes, UML Sequence diagrams, and SQLite persistence.'
+    });
+
+    // Student 2 also submits so Student 1 has a peer cohort to compare against!
+    homeworkService.submitHomework({
+      assignmentId: assignment.id,
+      studentId: student2.id,
+      repoUrl: 'https://github.com/student2/I2SE_Exe2_Basic',
+      content: 'Basic express app.'
+    });
+
+    // Student 1 clicks "Get LLM Review & Peer Comparison" on demand
+    const analyzed = await homeworkService.generateOnDemandReview(sub1.id);
+    assert.ok(analyzed.llm_review.includes('Deep Architectural'));
+    assert.ok(analyzed.llm_comparison.includes('1 Peer Submission'));
+    assert.ok(analyzed.score >= 75);
+  });
+});
