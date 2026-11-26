@@ -6,3 +6,4 @@ test_database.sqlite*
 .env
 uploads/
 
+database.backup-*.sqlite

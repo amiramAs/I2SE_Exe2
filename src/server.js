@@ -66,25 +66,53 @@ function createApp(dbPath) {
   app.get('/api/auth/config', (req, res) => {
     res.json({
       googleClientId: process.env.GOOGLE_CLIENT_ID || null,
-      lanBaseUrl: `http://${lanIp}:${port}`,
-      users: authService.getAllUsers()
+      lanBaseUrl: `http://${lanIp}:${port}`
     });
   });
 
+  // Real Google Sign-In: only a Google-signed ID token (credential) is accepted.
   app.post('/api/auth/google', async (req, res) => {
     try {
-      const user = await authService.authenticateGoogleUser(req.body);
-      res.json({ user });
+      const user = await authService.loginWithGoogleCredential(req.body && req.body.credential);
+      const token = authService.issueSessionToken(user);
+      res.json({ user, token });
+    } catch (err) {
+      res.status(401).json({ error: `Google sign-in failed: ${err.message}` });
+    }
+  });
+
+  // Restore session after page refresh using the signed session token.
+  app.get('/api/auth/me', (req, res) => {
+    const header = req.headers.authorization || '';
+    const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+    const user = authService.getUserFromSessionToken(token);
+    if (!user) return res.status(401).json({ error: 'Session expired' });
+    res.json({ user });
+  });
+
+  app.post('/api/auth/register', (req, res) => {
+    try {
+      const user = authService.registerWithPassword(req.body || {});
+      res.json({ user, token: authService.issueSessionToken(user) });
     } catch (err) {
       res.status(400).json({ error: err.message });
     }
   });
 
-  app.patch('/api/auth/role', (req, res) => {
+  app.post('/api/auth/login', (req, res) => {
     try {
-      const { userId, role } = req.body;
-      const user = authService.switchUserRole(Number(userId), role);
-      res.json({ user });
+      const user = authService.loginWithPassword(req.body || {});
+      res.json({ user, token: authService.issueSessionToken(user) });
+    } catch (err) {
+      res.status(401).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/admin/reset', (req, res) => {
+    try {
+      dbManager.resetAllDataForCleanDemo();
+      io.emit('system:reset');
+      res.json({ ok: true });
     } catch (err) {
       res.status(400).json({ error: err.message });
     }

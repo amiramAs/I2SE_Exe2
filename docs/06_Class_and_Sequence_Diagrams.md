@@ -26,7 +26,11 @@ classDiagram
         -Set~string~ adminEmails
         +constructor(dbManager: DatabaseManager)
         +authenticateGoogleUser(payload: Object) User
-        +switchUserRole(userId: number, newRole: string) User
+        +loginWithGoogleCredential(credential: string) User
+        +registerWithPassword(name, email, password) User
+        +loginWithPassword(email, password) User
+        +issueSessionToken(user: User) string
+        +getUserFromSessionToken(token: string) User
         +getUserById(userId: number) User
         +getAllUsers() User[]
     }
@@ -51,18 +55,22 @@ classDiagram
         -DatabaseManager dbManager
         +constructor(dbManager: DatabaseManager)
         +askQuestion(courseId: number, sessionId: number, studentId: number, content: string, isAnonymous: boolean) Question
+        +getQuestionById(questionId: number) Question
         +dismissLiveQuestion(questionId: number) Question
-        +replyToQuestion(questionId: number, replyText: string) Question
+        +replyToQuestion(questionId: number, replyText: string, authorUser: Object) Question
         +getQuestionsByCourse(courseId: number) Question[]
+        +getQuestionHistory(filters: Object) QuestionHistoryReport
+        +exportQuestionsCSV(filters: Object) string
     }
 
     class PollService {
         -DatabaseManager dbManager
         +constructor(dbManager: DatabaseManager)
-        +createPoll(sessionId: number, question: string, options: string[]) Poll
+        +createPoll(courseId: number, sessionId: number, question: string, options: string[], allowMultiple: boolean) Poll
         +closePoll(pollId: number) Poll
-        +castVote(pollId: number, studentId: number, optionIndex: number) VoteConfirmation
-        +getPollResultsForLecturer(pollId: number) PollResults
+        +castVote(pollId: number, studentId: number, optionSelection: number|number[]) VoteConfirmation
+        +getActivePollForStudent(courseId: number, studentId: number) StudentPollView
+        +getPollForLecturer(pollId: number) PollResults
     }
 
     class LLMService {
@@ -84,12 +92,24 @@ classDiagram
         +getAssignmentSubmissions(assignmentId: number) Submission[]
     }
 
+    class UserManagementService {
+        -DatabaseManager dbManager
+        +constructor(dbManager: DatabaseManager)
+        +listUsers() UserSummary[]
+        +listAllCourses() CourseSummary[]
+        +getUserProfile(userId: number) UserActivityProfile
+        +setUserRole(actorId: number, userId: number, role: string) User
+        +enrollUser(userId: number, courseId: number) UserActivityProfile
+        +unenrollUser(userId: number, courseId: number) UserActivityProfile
+    }
+
     AuthService --> DatabaseManager : uses
     AttendanceService --> DatabaseManager : uses
     QAService --> DatabaseManager : uses
     PollService --> DatabaseManager : uses
     HomeworkService --> DatabaseManager : uses
     HomeworkService --> LLMService : delegates AI analysis
+    UserManagementService --> DatabaseManager : uses
 ```
 
 ---
@@ -128,38 +148,45 @@ sequenceDiagram
     LecturerPC->>Server: PATCH /api/attendance/manual (Lecturer manually edits roster)
 ```
 
-### 2.2 Live Anonymous/Named Q&A (Projector Audio Alert) & Post-Class Offline Reply
+### 2.2 Live & Offline Q&A (OS Push to Lecturer Outside Site), In-Site Threaded Replies (OS Push to Asking Student) & Lecturer Question History
 
 ```mermaid
 sequenceDiagram
     actor Student as 📱 Student
     participant Server as ⚙️ Express + Socket.IO
     participant QASvc as 💬 QAService
-    actor LecturerPC as 🖥️ Lecturer PC (Connected to Projector)
+    actor LecturerPC as 🖥️ Lecturer PC (Projector / Outside Browser)
 
     rect rgb(235, 245, 255)
-        Note over Student,LecturerPC: Scenario A: Live Question During Active Lecture
-        Student->>Server: POST /api/questions {content, isAnonymous: true}
-        Server->>QASvc: askQuestion(courseId, sessionId, studentId, content, true)
-        QASvc-->>Server: Question (is_live = true, author = "Anonymous Student")
-        Server-->>LecturerPC: Socket.IO emit("question:live", question)
-        Note over LecturerPC: Plays Web Audio Chime + OS Desktop Notification + Projector Modal
-        LecturerPC->>Server: PATCH /api/questions/:id/dismiss (Answers verbally & clicks Dismiss)
+        Note over Student,LecturerPC: Scenario A: Student Asks Question -> OS Push to Lecturer (Even Outside Site)
+        Student->>Server: POST /api/questions {courseId, sessionId, studentId, content, isAnonymous}
+        Server->>QASvc: askQuestion(courseId, sessionId, studentId, content, isAnonymous)
+        QASvc-->>Server: Question (enriched with course_code, session_title, status="PENDING")
+        Server-->>LecturerPC: Socket.IO emit("question:new", question)
+        Note over LecturerPC: Plays Web Audio Chime + Native OS Push Notification (new Notification / sw.js)<br/>+ Floating Toast + Projector Popup Modal (with inline reply input)
+        alt Lecturer answers verbally
+            LecturerPC->>Server: PATCH /api/questions/:id/dismiss
+        else Lecturer replies in writing (from Modal or Question History tab)
+            LecturerPC->>Server: PATCH /api/questions/:id/reply {replyText, userId, authorName, authorRole}
+            Server->>QASvc: replyToQuestion(questionId, replyText, authorUser)
+            QASvc-->>Server: Updated Question + question_replies thread
+            Server-->>Student: Socket.IO emit("question:replied", {question, reply, target_student_id})
+            Note over Student: Asking Student receives Native OS Push Notification + Audio Chime + Toast + Tab Badge!
+        end
     end
 
     rect rgb(245, 255, 240)
-        Note over Student,LecturerPC: Scenario B: Post-Class Offline Question
-        Student->>Server: POST /api/questions {content, isAnonymous: false} (No active session)
-        Server->>QASvc: askQuestion(courseId, null, studentId, content, false)
-        QASvc-->>Server: Question (is_live = false)
-        Server-->>LecturerPC: Updates Unread Question Badge on Course Dashboard
-        LecturerPC->>Server: PATCH /api/questions/:id/reply {replyText}
-        Server->>QASvc: replyToQuestion(questionId, replyText)
-        Server-->>Student: Socket.IO emit("question:replied") — Displayed on Course Page
+        Note over Student,LecturerPC: Scenario B: Lecturer Browses & Exports Filtered Question History
+        LecturerPC->>Server: GET /api/questions/history?courseId=&sessionId=&status=&studentId=&search=
+        Server->>QASvc: getQuestionHistory(filters)
+        QASvc-->>LecturerPC: {questions, sessions, students, stats}
+        LecturerPC->>Server: GET /api/questions/history-export.csv
+        Server->>QASvc: exportQuestionsCSV(filters)
+        QASvc-->>LecturerPC: UTF-8 CSV Spreadsheet Download
     end
 ```
 
-### 2.3 On-the-Spot Multiple-Choice (KISS) Poll (Projector-Only Results)
+### 2.3 On-the-Spot Multiple-Choice (KISS) Poll (Single / Multi-Select & Projector-Only Results)
 
 ```mermaid
 sequenceDiagram
@@ -168,17 +195,17 @@ sequenceDiagram
     participant PollSvc as 📊 PollService
     actor Student as 📱 Student Phone
 
-    LecturerPC->>Server: POST /api/polls {sessionId, question, options: ["A","B","C","D"]}
-    Server->>PollSvc: createPoll(sessionId, question, options)
+    LecturerPC->>Server: POST /api/polls {courseId, sessionId, question, options: ["A","B","C","D"], allowMultiple}
+    Server->>PollSvc: createPoll(courseId, sessionId, question, options, allowMultiple)
     PollSvc-->>Server: Poll + Direct Poll QR Code
-    Server-->>Student: Socket.IO emit("poll:started", {id, question, options})
+    Server-->>Student: Socket.IO emit("poll:started", {id, question, options, allow_multiple})
     Server-->>LecturerPC: Displays Poll QR & Live 0% Bar Chart on Projector
 
-    Student->>Server: POST /api/polls/:id/vote {optionIndex: 1}
-    Server->>PollSvc: castVote(pollId, studentId, 1)
-    PollSvc-->>Student: {voted: true, message: "Your vote has been recorded!"}
+    Student->>Server: POST /api/polls/:id/vote {optionIndex OR optionIndices: [0, 1]}
+    Server->>PollSvc: castVote(pollId, studentId, selection)
+    PollSvc-->>Student: {voted: true, selected_option_indices, message: "Your vote has been recorded!"}
     Note over Student: Phone shows confirmation only (no chart spoilers)
-    Server->>PollSvc: getPollResultsForLecturer(pollId)
+    Server->>PollSvc: getPollForLecturer(pollId)
     Server-->>LecturerPC: Socket.IO emit("poll:results_updated", tallies)
 ```
 

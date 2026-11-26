@@ -8,7 +8,7 @@
 ## 1. Executive Summary
 
 To satisfy the assignment requirement *"Perform a technical-related tools report - make sure to test (in real life) with any suggested tool"*, we evaluated and benchmarked candidate technologies across all five system pillars refined during our product specification:
-1. **Authentication, Role Resolution & Multi-Course Auto-Enrollment** (Google OAuth 2.0 + 1-Click Role Switcher)
+1. **Authentication, Role Resolution & Multi-Course Auto-Enrollment** (Google OAuth 2.0 + Email/Password Registration)
 2. **Dual-Factor Anti-Spoofing Attendance & Mobile Admin Classroom Photo Counter** (Session QR + HTML5 Geolocation Haversine GPS + Phone-to-PC AI Person Counting + Per-Student Attendance History Filtering)
 3. **Projector-First Real-Time & Offline Q&A with Anonymity** (Socket.IO + Web Audio API Chime + Web Notifications API)
 4. **On-the-Spot Multiple-Choice KISS Polls** (WebSockets + Projector-Only Live Bar Charts)
@@ -39,15 +39,15 @@ In our design, the lecturer can open the web app on their smartphone (logged in 
 
 > **Design Decision:** Combining client-side `coco-ssd` bounding-box detection with server-side `LLMService.countPeopleInClassroomPhoto()` and instant Socket.IO synchronization from the lecturer's phone to the lecturer's computer gives immediate visual proof when `Digitally Registered Students > Counted in Photo`, while allowing the lecturer to manually toggle attendance in the roster table.
 
-### 2.3 Projector-First Live Q&A & Background Window Notifications
+### 2.3 Projector-First Live & Offline Q&A, Threaded Replies & Bidirectional OS Push Notifications
 
-Because the lecturer's computer is connected to the classroom projector, incoming student questions (which can be sent by name or **Anonymously**) must pop up on the screen with sound even when the lecturer is viewing another window (such as PowerPoint slides).
+Because the lecturer's computer is connected to the classroom projector, incoming student questions (which can be sent by name or **Anonymously**) must trigger an OS-level visual push notification with sound even when the lecturer is outside the browser window (such as presenting PowerPoint slides). Likewise, when a question receives a reply inside the site, the student who asked must receive an OS push notification.
 
 | Tool / Web API | Purpose | Real-Life Testing Observations | Decision |
 | :--- | :--- | :--- | :--- |
-| **Socket.IO (`v4.8`)** | Bidirectional low-latency event transport between student phones, lecturer phone, and lecturer PC. | Maintained stable WebSocket connections across mobile 4G/5G and campus Wi-Fi with automatic reconnection. Latency averaged $<35\text{ms}$. | **Selected** |
-| **Web Notifications API (`new Notification()`)** | OS-level system banner notification when browser tab is minimized or behind presentation slides. | Tested on Windows 11 with Chrome/Edge behind a full-screen slide deck. Once permission is granted, OS banner notifications appear on top of the screen reliably. | **Selected** |
-| **Web Audio API (`AudioContext` Synthesizer)** | Plays an audible 3-tone chime when a live question or fraud alert arrives. | Synthesizing a chime (`587.33 Hz` D5 -> `880 Hz` A5 -> `1174.66 Hz` D6) via `AudioContext` requires zero external MP3 files and plays reliably in background tabs. | **Selected** |
+| **Socket.IO (`v4.8`)** | Bidirectional low-latency event transport (`question:new`, `question:replied`, `question:updated`) between student devices and lecturer PC. | Maintained stable WebSocket connections across mobile 4G/5G and campus Wi-Fi with automatic reconnection. Latency averaged $<35\text{ms}$. | **Selected** |
+| **Web Notifications API (`new Notification()`) + Service Worker (`public/sw.js`)** | Native OS system push banner (`requireInteraction: true`, `renotify: true`) for both lecturer (on new question) and student (when their question is replied to), even when the browser window is unfocused or behind slides. | Tested on Windows 11 with Chrome/Edge behind a full-screen slide deck. Ensuring `options.data` contains only structured-cloneable primitives (separating `onClick` handlers from `data`) prevents `DataCloneError` and guarantees reliable background OS push alerts. Clicking the OS banner focuses the window and navigates directly to the Q&A tab. | **Selected** |
+| **Web Audio API (`AudioContext` Synthesizer)** | Plays an audible 3-tone chime when a new question, reply, or fraud alert arrives. | Synthesizing a chime (`587.33 Hz` D5 -> `880 Hz` A5 -> `1174.66 Hz` D6) via `AudioContext` requires zero external MP3 files and plays reliably in background tabs. | **Selected** |
 
 ### 2.4 Lecture Recording & ML Summarization with Lecturer Approval Workflow
 
@@ -69,4 +69,4 @@ Because the lecturer's computer is connected to the classroom projector, incomin
 | :--- | :--- | :--- |
 | **Runtime & Server** | Node.js `v22.14` + Express.js | Fast startup, unified JavaScript stack across client/server, native support for `fetch` and test runner (`node --test`). |
 | **Database** | Native `node:sqlite` (`DatabaseSync`) | Built directly into Node.js v22 — provides full ACID relational SQLite persistence (`database.sqlite`) with zero native C++ compilation issues on Windows. |
-| **Authentication** | Google Identity Services + `google-auth-library` | Default `STUDENT` role, whitelisted lecturer emails get `ADMIN`, plus 1-click Role Switcher (`ADMIN` $\leftrightarrow$ `STUDENT`) for seamless live classroom demos. |
+| **Authentication** | Google Identity Services + `google-auth-library`, Node `crypto.scrypt` password hashing | Sign in with Google or email/password. Each user has a fixed role in the DB (default `STUDENT`, lecturers `ADMIN`); seeded demo accounts for testing. |

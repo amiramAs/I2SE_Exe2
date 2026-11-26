@@ -1,522 +1,448 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>LiveClass AI — Interactive Classroom Teaching Platform</title>
+  <title>LiveClass AI — Simple Classroom Tool</title>
   <link rel="stylesheet" href="styles.css" />
   <script src="/socket.io/socket.io.js"></script>
-  <!-- TensorFlow.js & COCO-SSD for Client-Side AI Classroom Photo Person Counting -->
+  <!-- Official Google Identity Services (GSI) for real 1-Click Google Account Login -->
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <!-- TensorFlow.js & COCO-SSD for AI Classroom Photo Person Counting -->
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js" defer></script>
 </head>
+
 <body>
-  <!-- TOP NAVIGATION BAR -->
+  <!-- MINIMAL TOP BAR -->
   <header class="topbar">
     <div class="brand">
       <span class="brand-logo">🎓</span>
-      <div>
-        <h1>LiveClass AI</h1>
-        <span class="brand-sub">Vibe Coding &amp; Deep Designing — Smart Classroom Hub</span>
-      </div>
+      <h1>LiveClass AI</h1>
     </div>
 
     <div id="userControls" class="user-controls hidden">
       <div class="course-selector-wrap">
-        <label for="courseSelect">Course:</label>
         <select id="courseSelect" class="select-input"></select>
-        <button id="btnNewCourseModal" class="btn btn-sm btn-outline admin-only">+ New Course</button>
+        <button id="btnNewCourseModal" class="btn btn-sm btn-outline admin-only">+ Course</button>
       </div>
 
       <div class="user-badge">
         <img id="userAvatar" src="" alt="avatar" class="avatar" />
-        <div class="user-meta">
-          <span id="userName"></span>
-          <span id="userRoleBadge" class="role-pill"></span>
-        </div>
+        <span id="userName"></span>
+        <span id="userRoleBadge" class="role-pill"></span>
       </div>
-
-      <button id="btnSwitchRole" class="btn btn-sm btn-accent" title="1-Click Demo Role Switcher">
-        🔄 Switch to <span id="switchTargetRole">ADMIN</span>
-      </button>
-      <button id="btnEnableAlerts" class="btn btn-sm btn-outline admin-only" title="Enable Desktop & Audio Alerts even when in PowerPoint">
-        🔔 Enable Sound &amp; OS Alerts
+      <button id="btnResetDemoData" class="btn btn-sm btn-outline admin-only"
+        title="Wipe all courses, attendance, questions, polls & homework to start a fresh demo from zero">
+        🧹 Reset All (Clean Start)
       </button>
       <button id="btnLogout" class="btn btn-sm btn-ghost">Sign Out</button>
     </div>
   </header>
 
-  <!-- LIVE QUESTION PROJECTOR POPUP MODAL (Pops up on Lecturer PC with Chime when Student asks a live question) -->
+  <!-- LIVE QUESTION PROJECTOR POPUP MODAL -->
   <div id="liveQuestionModal" class="projector-modal hidden">
     <div class="projector-modal-card">
       <div class="projector-modal-header">
         <span class="pulse-dot"></span>
-        <h2>✋ Incoming Live Classroom Question!</h2>
+        <h2>✋ Live Question</h2>
         <span id="liveModalAuthor" class="author-tag"></span>
       </div>
       <p id="liveModalContent" class="projector-question-text"></p>
       <div class="projector-modal-actions">
         <button id="btnDismissLiveQuestion" class="btn btn-primary btn-lg">
-          ✅ Answered Verbally — Got it / Dismiss
+          ✅ Got it / Dismiss
         </button>
       </div>
     </div>
   </div>
 
-  <!-- LOGIN / GOOGLE OAUTH SCREEN -->
+  <!-- ========================================================================
+       CLEAN GOOGLE SIGN-IN SCREEN (NO NAME/EMAIL TEXT FIELDS)
+       ======================================================================== -->
   <main id="authScreen" class="auth-container">
     <div class="auth-card">
       <div class="auth-hero">
         <span class="hero-icon">🎓</span>
-        <h2>Welcome to LiveClass AI</h2>
-        <p>Sign in with your Google Account to manage your classroom (Lecturer ADMIN) or join your courses (Student).</p>
+        <h2>LiveClass AI</h2>
+        <p>Sign in to enter your classroom.</p>
       </div>
 
       <div id="qrScanNotice" class="alert alert-info hidden"></div>
 
-      <!-- Custom Google Sign-In Form -->
-      <form id="googleSignInForm" class="google-form">
-        <div class="form-row">
-          <div class="form-group">
-            <label>Google Email Address</label>
-            <input type="email" id="loginEmail" placeholder="your.name@msmail.ariel.ac.il" required />
-          </div>
-          <div class="form-group">
-            <label>Full Name</label>
-            <input type="text" id="loginName" placeholder="e.g. Noa Cohen" required />
-          </div>
+      <!-- Email + Password Sign-In / Register (no Gmail required) -->
+      <div class="auth-mode-tabs">
+        <button type="button" class="auth-mode-btn active" data-authmode="login">Sign In</button>
+        <button type="button" class="auth-mode-btn" data-authmode="register">Create Account</button>
+      </div>
+
+      <form id="passwordLoginForm" class="stack-form auth-form">
+        <div class="form-group">
+          <label for="loginEmail">Email</label>
+          <input type="email" id="loginEmail" autocomplete="username" required />
         </div>
-        <button type="submit" class="btn btn-google btn-block">
-          <svg class="google-icon" viewBox="0 0 24 24" width="20" height="20">
-            <path fill="#EA4335" d="M12 5c1.6 0 3 .6 4.1 1.7l3.1-3.1C17.3 1.8 14.8 1 12 1 7.4 1 3.5 3.6 1.6 7.4l3.7 2.8C6.2 7.2 8.9 5 12 5z"/>
-            <path fill="#4285F4" d="M23.5 12.3c0-.8-.1-1.6-.2-2.3H12v4.5h6.5c-.3 1.5-1.1 2.8-2.4 3.6l3.7 2.9c2.2-2 3.7-5 3.7-8.7z"/>
-            <path fill="#FBBC05" d="M5.3 14.8c-.2-.8-.4-1.6-.4-2.5s.2-1.7.4-2.5L1.6 7C.6 9 0 11.2 0 13.5s.6 4.5 1.6 6.5l3.7-2.9z"/>
-            <path fill="#34A853" d="M12 24c3.2 0 6-1.1 8-3l-3.7-2.9c-1.1.7-2.5 1.2-4.3 1.2-3.1 0-5.8-2.1-6.7-5l-3.7 2.8C3.5 21.4 7.4 24 12 24z"/>
-          </svg>
-          Continue with Google Account
-        </button>
+        <div class="form-group">
+          <label for="loginPassword">Password</label>
+          <input type="password" id="loginPassword" autocomplete="current-password" required />
+        </div>
+        <button type="submit" class="btn btn-primary btn-block">Sign In</button>
       </form>
 
-      <div class="divider"><span>OR 1-Click Classroom Demo Accounts</span></div>
+      <form id="registerForm" class="stack-form auth-form hidden">
+        <div class="form-group">
+          <label for="registerName">Full Name</label>
+          <input type="text" id="registerName" autocomplete="name" required />
+        </div>
+        <div class="form-group">
+          <label for="registerEmail">Email</label>
+          <input type="email" id="registerEmail" autocomplete="username" required />
+        </div>
+        <div class="form-group">
+          <label for="registerPassword">Password</label>
+          <input type="password" id="registerPassword" autocomplete="new-password" minlength="4" required />
+        </div>
+        <button type="submit" class="btn btn-primary btn-block">Create Account</button>
+      </form>
 
-      <div id="demoUsersGrid" class="demo-users-grid"></div>
+      <div class="auth-divider"><span>or</span></div>
+
+      <!-- Real Google Identity Services (GSI) Sign-In button (rendered by Google) -->
+      <div class="google-signin-center">
+        <div id="googleSignInButton"></div>
+      </div>
+      <div id="authError" class="alert alert-danger hidden mt-12"></div>
     </div>
   </main>
 
   <!-- ========================================================================
-       LECTURER (ADMIN) DASHBOARD (Desktop Projector + Mobile Admin Camera)
+       LECTURER (ADMIN) DASHBOARD — 5 SIMPLE TABS (ONE FEATURE PER TAB)
        ======================================================================== -->
   <main id="adminDashboard" class="dashboard-container hidden">
-    <!-- Admin Feature Navigation Tabs -->
     <nav class="feature-tabs">
-      <button class="tab-btn active" data-tab="admin-attendance">
-        📍 1. Attendance &amp; AI Photo Audit
-      </button>
-      <button class="tab-btn" data-tab="admin-history">
-        📅 Attendance History &amp; Student Filter
-      </button>
-      <button class="tab-btn" data-tab="admin-qa">
-        💬 2. Live &amp; Offline Q&amp;A <span id="adminQaBadge" class="badge">0</span>
-      </button>
-      <button class="tab-btn" data-tab="admin-polls">
-        📊 3. On-the-Spot KISS Polls
-      </button>
-      <button class="tab-btn" data-tab="admin-summary">
-        🎙️ 4. Recording &amp; ML Summary
-      </button>
-      <button class="tab-btn" data-tab="admin-homework">
-        📂 5. Homework &amp; LLM Peer Reviews
-      </button>
+      <button class="tab-btn active" data-tab="admin-attendance">📍 1. Attendance</button>
+      <button class="tab-btn" data-tab="admin-qa">💬 2. Questions <span id="adminQaBadge"
+          class="badge">0</span></button>
+      <button class="tab-btn" data-tab="admin-polls">📊 3. Polls</button>
+      <button class="tab-btn" data-tab="admin-summary">🎙️ 4. Lecture Summary</button>
+      <button class="tab-btn" data-tab="admin-homework">📂 5. Homework</button>
     </nav>
 
-    <!-- TAB 1: LIVE ATTENDANCE, QR, GPS & MOBILE-TO-PC CLASSROOM PHOTO AUDIT -->
+    <!-- TAB 1: ATTENDANCE -->
     <section id="admin-attendance" class="tab-panel active">
-      <!-- Fraud / Over-Capacity Discrepancy Alert Banner -->
       <div id="fraudAlertBanner" class="alert alert-danger hidden">
-        <div class="alert-title">🚨 ATTENDANCE SPOOFING / DISCREPANCY ALERT!</div>
+        <div class="alert-title">🚨 Too Many Students Registered!</div>
         <div id="fraudAlertText"></div>
       </div>
 
-      <div class="grid-2col">
-        <!-- Left Card: Session QR Code & GPS Geofence Control -->
-        <div class="card">
-          <div class="card-header">
-            <h3>📡 Live Session QR &amp; Dual-Factor GPS Geofence</h3>
-            <span id="sessionStatusBadge" class="status-badge"></span>
-          </div>
-
-          <div class="session-start-bar">
-            <input type="text" id="newSessionTitle" placeholder="Lecture Title (e.g., Lecture 4: Design Patterns)" />
-            <input type="number" id="newSessionRadius" value="60" min="15" max="500" title="Allowed GPS Radius (meters)" style="width:90px" />
-            <span class="unit-label">m radius</span>
-            <button id="btnStartSession" class="btn btn-primary">▶ Start New Session</button>
-            <button id="btnEndSession" class="btn btn-danger hidden">⏹ End Session</button>
-          </div>
-
-          <div id="activeSessionBox" class="qr-projector-box">
-            <div class="qr-image-wrap">
-              <img id="sessionQrImage" src="" alt="Session QR Code" />
-              <div class="qr-token-pill" id="sessionQrToken"></div>
-            </div>
-            <div class="qr-instructions">
-              <h4 id="activeSessionTitle"></h4>
-              <p><strong>Lecture 1:</strong> Students scan QR to <strong>Auto-Enroll in Course + Check-In</strong>.</p>
-              <p><strong>Lecture 2+:</strong> Students can scan QR OR check in directly from <em>"My Courses"</em> (verifies active session + GPS proximity).</p>
-              <div class="gps-coords-box" id="lecturerGpsDisplay"></div>
-              <a id="sessionDirectLink" href="#" target="_blank" class="direct-link">🔗 Open Student Session Link</a>
-            </div>
-          </div>
-        </div>
-
-        <!-- Right Card: Mobile Admin Camera / Classroom Photo AI Person Counter -->
-        <div class="card">
-          <div class="card-header">
-            <h3>📸 AI Classroom Photo Person Counter (Phone ➡️ PC Sync)</h3>
-            <span class="pill-tag">TensorFlow.js COCO-SSD + Gemini Vision</span>
-          </div>
-          <p class="card-desc">
-            Open this page as <strong>ADMIN on your smartphone</strong> (or right here on PC) and snap/upload a classroom photo. The AI counts visible students and updates your projector screen live!
-          </p>
-
-          <div class="kpi-strip">
-            <div class="kpi-box">
-              <span class="kpi-label">Digitally Checked-In</span>
-              <span id="kpiRegisteredCount" class="kpi-value">0</span>
-            </div>
-            <div class="kpi-box">
-              <span class="kpi-label">Counted in Photo (AI)</span>
-              <span id="kpiPhotoCount" class="kpi-value">—</span>
-            </div>
-            <div class="kpi-box">
-              <span class="kpi-label">Audit Status</span>
-              <span id="kpiAuditStatus" class="kpi-value kpi-status">Waiting</span>
-            </div>
-          </div>
-
-          <div class="photo-controls">
-            <label class="btn btn-primary file-btn">
-              📷 Snap / Upload Classroom Photo
-              <input type="file" id="classroomPhotoInput" accept="image/*" capture="environment" hidden />
-            </label>
-            <button id="btnOpenLiveWebcam" class="btn btn-outline">🎥 Use Live Camera</button>
-            <button id="btnSimulateCrowdPhoto" class="btn btn-outline" title="Generates a realistic classroom photo canvas for instant testing">
-              🧪 Load Sample Classroom Photo (4 Students)
-            </button>
-          </div>
-
-          <!-- Optional Live Webcam Stream -->
-          <div id="webcamContainer" class="webcam-box hidden">
-            <video id="webcamVideo" autoplay playsinline muted></video>
-            <button id="btnCaptureWebcamFrame" class="btn btn-accent">📸 Capture &amp; Count People</button>
-          </div>
-
-          <!-- Annotated Canvas showing AI Bounding Boxes around counted people -->
-          <div class="canvas-preview-wrap">
-            <canvas id="photoAuditCanvas" width="540" height="300"></canvas>
-          </div>
-
-          <div class="manual-headcount-bar">
-            <label>Adjust / Override AI Photo Count:</label>
-            <input type="number" id="manualPhotoCountInput" min="0" max="300" value="4" style="width:80px" />
-            <button id="btnSyncPhotoCount" class="btn btn-sm btn-outline">Sync Count to Server</button>
-          </div>
-        </div>
-      </div>
-
-      <!-- Bottom Card: Live Session Attendance Roster with Manual Lecturer Edit -->
-      <div class="card mt-16">
-        <div class="card-header">
-          <h3>📋 Current Session Attendance Roster (Manual Edit Enabled)</h3>
-          <div class="header-actions">
-            <button id="btnExportCsvCurrent" class="btn btn-sm btn-outline">📥 Export Course CSV / Excel</button>
-          </div>
-        </div>
-        <div class="table-responsive">
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th>Student</th>
-                <th>Email</th>
-                <th>GPS Distance</th>
-                <th>Status</th>
-                <th>Check-In Time</th>
-                <th>Lecturer Manual Action</th>
-              </tr>
-            </thead>
-            <tbody id="liveAttendanceTableBody"></tbody>
-          </table>
-        </div>
-      </div>
-    </section>
-
-    <!-- TAB 1B: ATTENDANCE HISTORY & FILTER BY STUDENT ACROSS ALL LECTURES -->
-    <section id="admin-history" class="tab-panel">
       <div class="card">
         <div class="card-header">
-          <h3>📅 Course Attendance History &amp; Per-Student Filter</h3>
-          <div class="filter-controls">
-            <label for="historyStudentFilter"><strong>Filter by Student:</strong></label>
-            <select id="historyStudentFilter" class="select-input">
-              <option value="">All Enrolled Students</option>
-            </select>
-            <button id="btnExportHistoryCsv" class="btn btn-sm btn-primary">📥 Export Filtered CSV (Excel)</button>
+          <div>
+            <h3>📍 Session Attendance &amp; Classroom Photo Check</h3>
+            <span id="lecturerGpsDisplay" class="text-muted"></span>
+          </div>
+          <div class="row-actions">
+            <span id="sessionStatusBadge" class="status-badge"></span>
+            <input type="text" id="newSessionTitle" placeholder="Lecture Title" style="width:180px" />
+            <input type="number" id="newSessionRadius" value="60" min="15" max="500" style="width:75px"
+              title="GPS Radius (m)" />
+            <button id="btnStartSession" class="btn btn-primary">▶ Start Class</button>
+            <button id="btnEndSession" class="btn btn-danger hidden">⏹ End Class</button>
           </div>
         </div>
-        <p class="card-desc">
-          View every lecture session in the course, filter by a specific student to inspect their attendance across all classes, or click any cell to toggle Present/Absent manually.
-        </p>
 
-        <div id="studentFilterSummaryCard" class="student-summary-banner hidden"></div>
+        <div id="activeSessionBox" class="simple-split">
+          <!-- QR Code -->
+          <div class="qr-card-simple">
+            <img id="sessionQrImage" src="" alt="Session QR Code" />
+            <div id="activeSessionTitle" class="qr-title"></div>
+            <div id="sessionQrToken" class="qr-token-pill"></div>
+            <a id="sessionDirectLink" href="#" target="_blank" class="direct-link">Open Link</a>
+          </div>
 
-        <div class="table-responsive">
-          <table class="data-table" id="historyMatrixTable">
-            <thead id="historyTableHead"></thead>
-            <tbody id="historyTableBody"></tbody>
-          </table>
+          <!-- Photo Counter & KPIs -->
+          <div class="photo-card-simple">
+            <div class="kpi-strip">
+              <div class="kpi-box">
+                <span class="kpi-label">Registered</span>
+                <span id="kpiRegisteredCount" class="kpi-value">0</span>
+              </div>
+              <div class="kpi-box">
+                <span class="kpi-label">In Photo</span>
+                <span id="kpiPhotoCount" class="kpi-value">—</span>
+              </div>
+              <div class="kpi-box">
+                <span class="kpi-label">Status</span>
+                <span id="kpiAuditStatus" class="kpi-value kpi-status">OK</span>
+              </div>
+            </div>
+
+            <div class="photo-controls">
+              <label class="btn btn-primary file-btn">
+                📷 Take / Upload Class Photo
+                <input type="file" id="classroomPhotoInput" accept="image/*" capture="environment" hidden />
+              </label>
+              <button id="btnOpenLiveWebcam" class="btn btn-outline">🎥 Camera</button>
+              <button id="btnSimulateCrowdPhoto" class="btn btn-outline">🧪 Demo Photo (4)</button>
+            </div>
+
+            <div id="webcamContainer" class="webcam-box hidden">
+              <video id="webcamVideo" autoplay playsinline muted></video>
+              <button id="btnCaptureWebcamFrame" class="btn btn-accent">📸 Capture &amp; Count</button>
+            </div>
+
+            <div class="canvas-preview-wrap">
+              <canvas id="photoAuditCanvas" width="480" height="240"></canvas>
+            </div>
+
+            <div class="manual-headcount-bar">
+              <span>Photo Count:</span>
+              <input type="number" id="manualPhotoCountInput" min="0" max="300" value="4" style="width:70px" />
+              <button id="btnSyncPhotoCount" class="btn btn-sm btn-outline">Update</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Attendance Roster & History Filter by Student -->
+        <div class="roster-section mt-16">
+          <div class="card-header">
+            <h4>📋 Attendance List &amp; History</h4>
+            <div class="row-actions">
+              <select id="historyStudentFilter" class="select-input" style="width:240px">
+                <option value="">All Students</option>
+              </select>
+              <button id="btnExportHistoryCsv" class="btn btn-sm btn-outline">📥 Export CSV</button>
+            </div>
+          </div>
+
+          <div id="studentFilterSummaryCard" class="student-summary-banner hidden"></div>
+
+          <!-- Current Session Quick List -->
+          <div class="table-responsive">
+            <table class="data-table" id="historyMatrixTable">
+              <thead id="historyTableHead"></thead>
+              <tbody id="historyTableBody"></tbody>
+            </table>
+          </div>
+          <tbody id="liveAttendanceTableBody" class="hidden"></tbody>
+          <button id="btnExportCsvCurrent" class="hidden"></button>
         </div>
       </div>
     </section>
 
-    <!-- TAB 2: LIVE & OFFLINE Q&A MANAGEMENT -->
+    <!-- TAB 2: QUESTIONS -->
     <section id="admin-qa" class="tab-panel">
       <div class="card">
         <div class="card-header">
-          <h3>💬 Student Questions (Live Projector Popups &amp; Post-Class Offline Q&amp;A)</h3>
-          <button id="btnTestAudioChime" class="btn btn-sm btn-outline">🔊 Test Alert Chime</button>
+          <h3>💬 Student Questions (Live &amp; Post-Class)</h3>
+          <div class="row-actions">
+            <button id="btnEnableAlerts" class="btn btn-sm btn-outline">🔔 Enable Sound &amp; Popups</button>
+            <button id="btnTestAudioChime" class="btn btn-sm btn-outline">🔊 Test Sound</button>
+          </div>
         </div>
-        <p class="card-desc">
-          <strong>Live in class:</strong> Questions pop up automatically on your screen with sound so the class sees them on the projector and you can answer verbally.
-          <strong>After class (Offline):</strong> Type a written reply below and it will appear on the student's course page.
-        </p>
         <div id="adminQuestionsList" class="qa-feed"></div>
       </div>
     </section>
 
-    <!-- TAB 3: ON-THE-SPOT MULTIPLE-CHOICE (KISS) POLLS -->
+    <!-- TAB 3: POLLS -->
     <section id="admin-polls" class="tab-panel">
-      <div class="grid-2col">
-        <div class="card">
-          <div class="card-header">
-            <h3>➕ Create On-the-Spot Multiple-Choice Poll</h3>
-          </div>
+      <div class="card">
+        <div class="simple-split">
           <form id="createPollForm" class="stack-form">
-            <div class="form-group">
-              <label>Poll Question</label>
-              <input type="text" id="pollQuestionInput" placeholder="e.g., Did you understand the Strategy vs. State pattern difference?" required />
+            <h3>📊 Create Multiple-Choice Poll</h3>
+            <div class="form-group mt-8">
+              <label>Question</label>
+              <input type="text" id="pollQuestionInput" placeholder="Type your question..." required />
             </div>
             <div class="form-group">
-              <label>Multiple-Choice Options (One per line, min 2)</label>
-              <textarea id="pollOptionsInput" rows="4" required>Yes, completely clear!
-Mostly, need one more code example
-Still confused about context switching
-Please review the UML diagram again</textarea>
+              <label>Options (one per line)</label>
+              <textarea id="pollOptionsInput" rows="4" required>Option A
+Option B
+Option C
+Option D</textarea>
             </div>
-            <button type="submit" class="btn btn-primary">🚀 Launch Live Poll to Class</button>
+            <button type="submit" class="btn btn-primary">🚀 Open Poll</button>
           </form>
-        </div>
 
-        <div class="card">
-          <div class="card-header">
-            <h3>📊 Live Projector Results &amp; Direct Poll QR</h3>
-            <button id="btnClosePoll" class="btn btn-sm btn-danger hidden">⏹ Close Poll</button>
+          <div>
+            <div class="card-header">
+              <h3>Live Poll Results</h3>
+              <button id="btnClosePoll" class="btn btn-sm btn-danger hidden">⏹ Close Poll</button>
+            </div>
+            <div id="adminPollResultsBox"></div>
           </div>
-          <p class="card-desc">
-            <em>Projector-Only Mode:</em> Students only see a vote confirmation on their phone; the live bar chart below is displayed exclusively on your projected screen!
-          </p>
-          <div id="adminPollResultsBox"></div>
         </div>
       </div>
     </section>
 
-    <!-- TAB 4: LIVE RECORDING / UPLOAD & ML LECTURE SUMMARY -->
+    <!-- TAB 4: LECTURE SUMMARY -->
     <section id="admin-summary" class="tab-panel">
-      <div class="grid-2col">
-        <div class="card">
-          <div class="card-header">
-            <h3>🎙️ Record Live Lecture or Upload Recording</h3>
+      <div class="card">
+        <div class="simple-split">
+          <div>
+            <h3>🎙️ Record or Upload Lecture</h3>
+            <div class="recorder-controls mt-12">
+              <button id="btnToggleRecording" class="btn btn-primary">⏺ Start Recording</button>
+              <span id="recordingTimer" class="rec-indicator hidden">🔴 Recording...</span>
+              <label class="btn btn-outline file-btn">
+                📂 Upload Recording
+                <input type="file" id="lectureFileInput" accept=".txt,.md,.srt,.vtt,audio/*,video/*" hidden />
+              </label>
+            </div>
+            <div class="form-group mt-12">
+              <input type="text" id="summaryTitleInput" placeholder="Lecture Title" />
+            </div>
+            <div class="form-group">
+              <textarea id="summaryTranscriptInput" rows="5"
+                placeholder="Recording transcript appears here..."></textarea>
+            </div>
+            <button id="btnGenerateSummary" class="btn btn-accent btn-block">✨ Summarize Lecture</button>
           </div>
-          <p class="card-desc">
-            Click <strong>"Start Recording"</strong> to capture live speech in class, or upload a recorded lecture file / transcript. The LLM will summarize the lecture and automatically integrate live student Q&amp;A!
-          </p>
 
-          <div class="recorder-controls">
-            <button id="btnToggleRecording" class="btn btn-primary">⏺ Start Live Recording</button>
-            <span id="recordingTimer" class="rec-indicator hidden">🔴 Recording Live Speech...</span>
-            <label class="btn btn-outline file-btn">
-              📂 Upload Recording / Transcript File
-              <input type="file" id="lectureFileInput" accept=".txt,.md,.srt,.vtt,audio/*,video/*" hidden />
-            </label>
+          <div>
+            <h3>📝 Lecture Summaries</h3>
+            <div id="adminSummariesList" class="summaries-list mt-12"></div>
           </div>
-
-          <div class="form-group mt-12">
-            <label>Lecture Title</label>
-            <input type="text" id="summaryTitleInput" placeholder="e.g., Lecture 3: Vibe Coding & Deep Designing" />
-          </div>
-          <div class="form-group">
-            <label>Captured / Uploaded Lecture Transcript (Editable before summarizing)</label>
-            <textarea id="summaryTranscriptInput" rows="6" placeholder="Live speech transcription will appear here as you speak, or upload/paste a lecture recording transcript..."></textarea>
-          </div>
-          <button id="btnGenerateSummary" class="btn btn-accent btn-block">✨ Generate AI Lecture Summary (Draft)</button>
-        </div>
-
-        <div class="card">
-          <div class="card-header">
-            <h3>📝 Lecturer Review, Edit &amp; Publish Summaries</h3>
-          </div>
-          <p class="card-desc">
-            Review or edit the generated summary draft below. Once you click <strong>"Publish to Course"</strong>, all enrolled students will see it on their course page!
-          </p>
-          <div id="adminSummariesList" class="summaries-list"></div>
         </div>
       </div>
     </section>
 
-    <!-- TAB 5: HOMEWORK ASSIGNMENTS & LLM PEER COMPARISON INSPECTOR -->
+    <!-- TAB 5: HOMEWORK -->
     <section id="admin-homework" class="tab-panel">
-      <div class="grid-2col">
-        <div class="card">
-          <div class="card-header">
-            <h3>➕ Open New Homework Assignment</h3>
-          </div>
+      <div class="card">
+        <div class="simple-split">
           <form id="createAssignmentForm" class="stack-form">
-            <div class="form-group">
-              <label>Assignment Title</label>
-              <input type="text" id="assignTitle" placeholder="e.g., Ex3: Microservices & Unit Testing" required />
+            <h3>📂 Open New Assignment</h3>
+            <div class="form-group mt-8">
+              <label>Title</label>
+              <input type="text" id="assignTitle" placeholder="Assignment Title" required />
             </div>
             <div class="form-group">
-              <label>Instructions &amp; Grading Criteria</label>
-              <textarea id="assignDesc" rows="3" placeholder="Describe requirements, OOP design rules, and expected deliverables..." required></textarea>
+              <label>Instructions</label>
+              <textarea id="assignDesc" rows="3" placeholder="Assignment instructions..." required></textarea>
             </div>
-            <div class="form-row">
-              <div class="form-group">
-                <label>Allowed Submission Format</label>
-                <select id="assignType" class="select-input">
-                  <option value="BOTH">GitHub Repo Link AND/OR File/Code Upload (Both)</option>
-                  <option value="GITHUB_ONLY">GitHub Repository URL Only</option>
-                  <option value="FILE_OR_TEXT">File / Code / Text Upload Only</option>
-                </select>
-              </div>
-              <div class="form-group">
-                <label>Due Date</label>
-                <input type="date" id="assignDue" value="2026-11-30" />
-              </div>
+            <div class="form-group">
+              <label>Submission Type</label>
+              <select id="assignType" class="select-input">
+                <option value="BOTH">GitHub Repo OR File/Code</option>
+                <option value="GITHUB_ONLY">GitHub Repo Link Only</option>
+                <option value="FILE_OR_TEXT">File / Code Upload Only</option>
+              </select>
             </div>
-            <button type="submit" class="btn btn-primary">📂 Publish Assignment to Course</button>
+            <input type="hidden" id="assignDue" value="2026-11-30" />
+            <button type="submit" class="btn btn-primary">Create Assignment</button>
           </form>
-        </div>
 
-        <div class="card">
-          <div class="card-header">
-            <h3>👩‍🎓 Student Submissions &amp; LLM Peer Reviews</h3>
+          <div>
+            <div class="card-header">
+              <h3>Student Submissions</h3>
+              <select id="adminAssignmentSelect" class="select-input" style="width:220px"></select>
+            </div>
+            <div id="adminSubmissionsList" class="submissions-list"></div>
           </div>
-          <div class="form-group">
-            <label>Select Assignment to Inspect:</label>
-            <select id="adminAssignmentSelect" class="select-input"></select>
-          </div>
-          <div id="adminSubmissionsList" class="submissions-list"></div>
         </div>
       </div>
     </section>
   </main>
 
   <!-- ========================================================================
-       STUDENT MOBILE WEB APP VIEW (KISS Smartphone Interface)
+       STUDENT VIEW — 5 SIMPLE TABS (ONE FEATURE PER TAB)
        ======================================================================== -->
-  <main id="studentDashboard" class="student-container hidden">
-    <!-- Enrolled Courses Strip ("My Courses" after first QR scan) -->
-    <section class="card student-courses-card">
-      <div class="card-header">
-        <h3>📚 My Enrolled Courses</h3>
-        <button id="btnSimulateFirstQrScan" class="btn btn-sm btn-outline">📷 Scan / Enter Session QR Token</button>
-      </div>
+  <main id="studentDashboard" class="dashboard-container hidden">
+    <!-- Simple Course Selector Chips -->
+    <div class="student-courses-bar">
       <div id="studentCoursesGrid" class="student-courses-grid"></div>
-    </section>
+      <button id="btnSimulateFirstQrScan" class="btn btn-sm btn-outline">📷 Scan Course QR</button>
+    </div>
 
-    <!-- Student Active Course Workspace -->
-    <div class="student-grid">
-      <!-- 1. Attendance Check-In Card -->
-      <section class="card">
+    <!-- 5 Feature Tabs for Student -->
+    <nav class="feature-tabs">
+      <button class="student-tab-btn active" data-stutab="stu-attendance">📍 1. Attendance</button>
+      <button class="student-tab-btn" data-stutab="stu-qa">💬 2. Ask Question</button>
+      <button class="student-tab-btn" data-stutab="stu-polls">📊 3. Poll</button>
+      <button class="student-tab-btn" data-stutab="stu-summary">📝 4. Summaries</button>
+      <button class="student-tab-btn" data-stutab="stu-homework">📂 5. Homework</button>
+    </nav>
+
+    <!-- STUDENT TAB 1: ATTENDANCE -->
+    <section id="stu-attendance" class="stu-tab-panel active">
+      <div class="card">
         <div class="card-header">
-          <h3>📍 1. Dual-Factor Attendance Check-In</h3>
+          <h3>📍 Mark Attendance</h3>
           <span id="studentSessionBadge" class="status-badge"></span>
         </div>
         <p id="studentSessionInfo" class="card-desc"></p>
-        <div class="student-checkin-actions">
-          <button id="btnStudentCheckIn" class="btn btn-primary btn-lg btn-block">
-            ✅ Mark My Attendance Now (QR + GPS Proximity)
-          </button>
-          <label class="checkbox-label mt-8">
-            <input type="checkbox" id="simulateFarGpsCheckbox" />
-            <span>🧪 Test Anti-Spoofing: Simulate GPS Outside Classroom (250m away)</span>
-          </label>
-        </div>
+        <button id="btnStudentCheckIn" class="btn btn-primary btn-lg btn-block">
+          ✅ Confirm My Attendance (QR + GPS)
+        </button>
+        <label class="checkbox-label mt-12">
+          <input type="checkbox" id="simulateFarGpsCheckbox" />
+          <span>Simulate being outside classroom (GPS far away)</span>
+        </label>
         <div id="studentCheckInResult" class="alert hidden mt-12"></div>
-      </section>
+      </div>
+    </section>
 
-      <!-- 2. Live Multiple-Choice Poll Card (Appears when active) -->
-      <section class="card" id="studentPollCard">
-        <div class="card-header">
-          <h3>📊 2. Live Classroom Poll</h3>
-        </div>
-        <div id="studentPollBody"></div>
-      </section>
-
-      <!-- 3. Ask Question (Live with Sound Popup on Projector OR Offline Post-Class) -->
-      <section class="card">
-        <div class="card-header">
-          <h3>✋ 3. Ask a Question (Live or Post-Class)</h3>
-        </div>
-        <form id="studentAskForm" class="stack-form">
-          <textarea id="studentQuestionInput" rows="3" placeholder="Type your question for the lecturer (pops up on projector if session is live, or sends offline notification after class)..." required></textarea>
+    <!-- STUDENT TAB 2: QUESTIONS -->
+    <section id="stu-qa" class="stu-tab-panel">
+      <div class="card">
+        <h3>✋ Ask the Lecturer a Question</h3>
+        <form id="studentAskForm" class="stack-form mt-12">
+          <textarea id="studentQuestionInput" rows="3" placeholder="Write your question here..." required></textarea>
           <div class="form-split">
             <label class="checkbox-label">
               <input type="checkbox" id="studentAnonCheckbox" checked />
-              <span>🕶️ Ask Anonymously</span>
+              <span>Ask Anonymously</span>
             </label>
-            <button type="submit" class="btn btn-accent">🚀 Send Question</button>
+            <button type="submit" class="btn btn-primary">Send Question</button>
           </div>
         </form>
-        <div id="studentQuestionsFeed" class="qa-feed mt-12"></div>
-      </section>
+        <div id="studentQuestionsFeed" class="qa-feed mt-16"></div>
+      </div>
+    </section>
 
-      <!-- 4. Published AI Lecture Summaries -->
-      <section class="card">
-        <div class="card-header">
-          <h3>📝 4. Published AI Lecture Summaries</h3>
-        </div>
-        <div id="studentSummariesList" class="summaries-list"></div>
-      </section>
+    <!-- STUDENT TAB 3: POLL -->
+    <section id="stu-polls" class="stu-tab-panel">
+      <div class="card" id="studentPollCard">
+        <h3>📊 Live Poll</h3>
+        <div id="studentPollBody" class="mt-12"></div>
+      </div>
+    </section>
 
-      <!-- 5. Homework Submission & On-Demand LLM Review + Peer Comparison -->
-      <section class="card student-full-width">
-        <div class="card-header">
-          <h3>📂 5. Homework Submission &amp; On-Demand LLM Peer Comparison</h3>
-        </div>
-        <div id="studentAssignmentsList"></div>
-      </section>
-    </div>
+    <!-- STUDENT TAB 4: SUMMARIES -->
+    <section id="stu-summary" class="stu-tab-panel">
+      <div class="card">
+        <h3>📝 Lecture Summaries</h3>
+        <div id="studentSummariesList" class="summaries-list mt-12"></div>
+      </div>
+    </section>
+
+    <!-- STUDENT TAB 5: HOMEWORK -->
+    <section id="stu-homework" class="stu-tab-panel">
+      <div class="card">
+        <h3>📂 Submit Homework &amp; Get LLM Comparison</h3>
+        <div id="studentAssignmentsList" class="mt-12"></div>
+      </div>
+    </section>
   </main>
 
   <!-- Modal for Creating a New Course -->
   <div id="newCourseModal" class="projector-modal hidden">
-    <div class="projector-modal-card" style="max-width:480px">
-      <h3>Create a New Course</h3>
+    <div class="projector-modal-card" style="max-width:420px">
+      <h3>New Course</h3>
       <form id="createCourseForm" class="stack-form mt-12">
         <div class="form-group">
-          <label>Course Code</label>
-          <input type="text" id="newCourseCode" placeholder="e.g. CS-301" required />
+          <label>Code</label>
+          <input type="text" id="newCourseCode" placeholder="CS-301" required />
         </div>
         <div class="form-group">
-          <label>Course Name</label>
-          <input type="text" id="newCourseName" placeholder="e.g. Operating Systems" required />
+          <label>Name</label>
+          <input type="text" id="newCourseName" placeholder="Course Name" required />
         </div>
-        <div class="form-group">
-          <label>Description</label>
-          <input type="text" id="newCourseDesc" placeholder="Course syllabus summary..." />
-        </div>
+        <input type="hidden" id="newCourseDesc" value="" />
         <div class="form-split">
           <button type="button" id="btnCancelCourseModal" class="btn btn-outline">Cancel</button>
-          <button type="submit" class="btn btn-primary">Create Course</button>
+          <button type="submit" class="btn btn-primary">Create</button>
         </div>
       </form>
     </div>
@@ -524,4 +450,5 @@ Please review the UML diagram again</textarea>
 
   <script src="app.js"></script>
 </body>
+
 </html>

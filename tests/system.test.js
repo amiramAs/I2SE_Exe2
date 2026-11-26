@@ -39,10 +39,10 @@ describe('LiveClass AI — End-to-End Software Components & OOP Classes Verifica
     dbManager.close();
   });
 
-  test('TC-AUTH-01..03: AuthService resolves default STUDENT vs whitelisted ADMIN role and supports Demo Role Switcher', async () => {
+  test('TC-AUTH-01..04: AuthService resolves per-user roles, seeded demo accounts, and email/password login', async () => {
     lecturer = await authService.authenticateGoogleUser({
-      email: 'lecturer@ariel.ac.il',
-      name: 'Dr. Boaz Ben-Moshe'
+      email: '1234amiram@gmail.com',
+      name: 'Amiram'
     });
     assert.equal(lecturer.role, 'ADMIN', 'Whitelisted lecturer email should receive ADMIN role');
 
@@ -52,17 +52,31 @@ describe('LiveClass AI — End-to-End Software Components & OOP Classes Verifica
     });
     assert.equal(student1.role, 'STUDENT', 'Default Google user should receive STUDENT role');
 
-    student2 = await authService.authenticateGoogleUser({
-      email: 'student.two@msmail.ariel.ac.il',
-      name: 'Student Two'
+    // Self-registration (no Gmail) -> always STUDENT, password is hashed and never returned
+    student2 = authService.registerWithPassword({
+      name: 'Student Two',
+      email: 'student.two@example.com',
+      password: 'secret12'
     });
     assert.equal(student2.role, 'STUDENT');
+    assert.equal(student2.password_hash, undefined, 'password hash must never be exposed');
+    assert.throws(() => authService.registerWithPassword({ email: 'student.two@example.com', password: 'xxxx' }));
 
-    // Test 1-Click Role Switcher
-    const switched = authService.switchUserRole(student1.id, 'ADMIN');
-    assert.equal(switched.role, 'ADMIN');
-    const restored = authService.switchUserRole(student1.id, 'STUDENT');
-    assert.equal(restored.role, 'STUDENT');
+    const relogged = authService.loginWithPassword({ email: 'Student.Two@example.com', password: 'secret12' });
+    assert.equal(relogged.id, student2.id);
+    assert.throws(() => authService.loginWithPassword({ email: 'student.two@example.com', password: 'wrong' }));
+
+    // Seeded demo accounts (password 1234) with fixed roles
+    dbManager.seedInitialData();
+    assert.equal(authService.loginWithPassword({ email: 'admin@test.com', password: '1234' }).role, 'ADMIN');
+    for (const email of ['test1@test.com', 'test2@test.com', 'test3@test.com']) {
+      assert.equal(authService.loginWithPassword({ email, password: '1234' }).role, 'STUDENT');
+    }
+
+    // Session tokens round-trip and reject tampering
+    const token = authService.issueSessionToken(student2);
+    assert.equal(authService.getUserFromSessionToken(token).id, student2.id);
+    assert.equal(authService.getUserFromSessionToken(`${token}x`), null);
   });
 
   test('TC-ATT-01..03: AttendanceService creates courses, auto-enrolls on Lecture 1 QR scan, and verifies Haversine GPS distance', () => {

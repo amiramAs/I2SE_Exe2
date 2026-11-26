@@ -17,17 +17,18 @@ Current online and classroom teaching tools fail to provide a seamless, trustwor
 
 ### Our Solution & Project Scope: **LiveClass AI**
 **LiveClass AI** is a full-stack, mobile-first web application (requiring zero native app installation — **KISS**) built around a single classroom projector + smartphone workflow:
-- **Google OAuth & First-Lecture Auto-Enrollment**: Everyone signs in with Google (default `STUDENT` role, whitelisted lecturer emails get `ADMIN`, plus an instant Role Switcher for live classroom demos). Lecturers manage **multiple courses**. In Lecture #1, scanning the session QR code automatically enrolls the student in the course and marks attendance. From Lecture #2 onward, the course appears permanently in **"My Courses"**, allowing check-in either via QR scan or directly from the course page (with active session & GPS verification).
+- **Sign-In (Google or Email/Password) & First-Lecture Auto-Enrollment**: Users sign in with Google **or** with email + password (self-registration, no Gmail required). Each user has a fixed role stored in the DB (default `STUDENT`; lecturers are `ADMIN`). Built-in demo accounts: `admin@test.com` (ADMIN), `test1@test.com`, `test2@test.com`, `test3@test.com` (STUDENT) — password `1234`. Lecturers manage **multiple courses**. In Lecture #1, scanning the session QR code automatically enrolls the student in the course and marks attendance. From Lecture #2 onward, the course appears permanently in **"My Courses"**, allowing check-in either via QR scan or directly from the course page (with active session & GPS verification).
 - **Feature 1 — Dual-Factor Attendance, Mobile Admin Classroom Photo Counter & History Filter**:
   - Combines **Session QR Scan** + **Haversine GPS Proximity Check** (verifying the student is physically near the lecturer).
   - **Phone-to-PC AI Classroom Photo Audit**: The lecturer can log in as `ADMIN` on their smartphone, snap a photo of the classroom (or upload an image), and send it to the server. The AI counts the people in the photo and updates the **Lecturer's Laptop Screen live via Socket.IO**, raising a prominent alert if `Digitally Registered Students > People Counted in Photo`.
   - **Manual Editing, Per-Student History Filter & CSV Export**: The lecturer can manually edit attendance in the live roster, view the full course attendance history filtered by a specific student across all lectures (or by session), and export an Excel-compatible `.csv` spreadsheet.
-- **Feature 2 — Projector-First Live & Offline Q&A (With Anonymity)**:
+- **Feature 2 — Projector-First Live & Offline Q&A (With Anonymity, Bidirectional OS Push & Lecturer Question History)**:
   - Students can ask questions by name or **Anonymously** through the same session link.
-  - **Live in Class**: Because the lecturer's PC is connected to the classroom projector, incoming questions trigger an **audible chime (Web Audio API)** + **OS Desktop Notification** (visible even over PowerPoint slides) + a **Projector Popup Banner** so everyone sees the question, the lecturer answers verbally, and clicks *"Got it / Dismiss"*.
-  - **Offline After Class**: Students ask questions on the same course page after class; the lecturer receives an unread notification badge on the site and posts a written answer visible on the course page.
-- **Feature 3 — On-the-Spot Multiple-Choice (KISS) Polls**:
-  - Lecturers create instant multiple-choice polls on the spot. Students vote either directly inside their open session screen or via a dedicated Poll QR code.
+  - **OS Push Notifications to Lecturer (Even Outside the Browser)**: Whenever a student asks a question (live or offline, across any course), the lecturer receives an **audible chime (Web Audio API)** + a native **OS Push Notification (`new Notification` + Service Worker `sw.js` with `requireInteraction: true`)** visible even when the lecturer is outside the browser window (e.g., presenting PowerPoint slides) + an in-app floating push toast + a **Projector Popup Modal** where the lecturer can either type an instant written reply or answer verbally and click *"Answered Verbally / Dismiss"*. Clicking the OS notification focuses the window and opens the Questions tab.
+  - **In-Site Threaded Replies & OS Push to the Student Who Asked**: Lecturers and students can reply to questions directly inside the website (`question_replies` thread). As soon as a question receives a reply (`question:replied`), the **student who asked the question receives an OS Push Notification** (even if outside the website), an audible chime, a floating toast banner, and an unread reply badge on their Q&A tab.
+  - **Lecturer Question History & CSV Export**: Lecturers can browse and filter the complete history of questions across the current course or all their courses—filtering by lecture/session (`Live`, `Offline`, or specific lecture), answer status (`Pending`, `Answered in Writing`, `Answered Verbally`), student/anonymous author, and free-text search—and export the history to an Excel-compatible `.csv` spreadsheet.
+- **Feature 3 — On-the-Spot Multiple-Choice (KISS) Polls (Single & Multi-Select)**:
+  - Lecturers create instant polls on the spot using dynamic per-option input boxes (`+ Add Option` / `×` remove) and can toggle **"Allow students to select multiple options"** (`allow_multiple`) for multi-select polls. Students vote either directly inside their open session screen or via a dedicated Poll QR code.
   - Student phones show a clean vote confirmation, while the **live bar chart updates exclusively on the lecturer's projected screen**.
 - **Feature 4 — Live Lecture Recording / Upload & ML Summary with Lecturer Approval**:
   - Lecturers click **"Start Recording"** (live browser speech/audio capture) or upload a lecture recording/transcript.
@@ -35,6 +36,8 @@ Current online and classroom teaching tools fail to provide a seamless, trustwor
 - **Feature 5 — Configurable Homework & On-Demand LLM Peer Comparison**:
   - Lecturers open assignments and define allowed submission formats: **GitHub Repository URL**, **File/Code/Text Upload**, or **Both**.
   - Whenever a student wants, they click **"Get LLM Review & Peer Comparison"** on their submission to receive an in-depth LLM code/design review and an **anonymized comparison against all classmates who have submitted up to that point**. Lecturers can inspect all student submissions and their LLM reviews.
+- **Admin User Management Dashboard (`👥 6. Users` Tab)**:
+  - Lecturers (`ADMIN`) can view and search all registered users, promote/demote roles (`STUDENT` $\leftrightarrow$ `ADMIN` with self-demotion and last-admin protection), manage course enrollments, and inspect any student's full activity profile (attendance history, questions asked, poll votes, and homework submissions).
 
 ---
 
@@ -67,7 +70,7 @@ npm install
 ```
 
 ### 2. Configure Optional API Keys (`.env`)
-The application works **100% out-of-the-box** with zero configuration (including built-in Google Demo Login, client-side TensorFlow.js person counting, and smart analytical LLM fallbacks). To enable live Google Cloud OAuth and Gemini 2.5 Flash API calls, copy `.env.example` to `.env` and add your keys:
+The application works **100% out-of-the-box** with zero configuration (email/password login with built-in demo accounts, client-side TensorFlow.js person counting, and smart analytical LLM fallbacks). To enable real Google Sign-In and Gemini 2.5 Flash API calls, copy `.env.example` to `.env` and add your keys (`GOOGLE_CLIENT_ID`, `GEMINI_API_KEY`, `ADMIN_EMAILS`, `JWT_SECRET`):
 ```bash
 cp .env.example .env
 ```
@@ -82,6 +85,22 @@ npm test
 npm start
 ```
 Then open **`http://localhost:3000`** in your browser (or scan the displayed LAN QR code from your smartphone on the same Wi-Fi/hotspot network!).
+
+### 5. Authentication & Demo Accounts
+Users can **sign in with Google** or with **email + password**, and anyone can **create an account** without a Gmail address. Each user has a **fixed role stored in the database** — there is no role switcher.
+
+| Account | Role | Sign-in |
+| :--- | :--- | :--- |
+| `1234amiram@gmail.com` | `ADMIN` (lecturer) | Google |
+| `admin@test.com` | `ADMIN` (lecturer) | password `1234` |
+| `test1@test.com`, `test2@test.com`, `test3@test.com` | `STUDENT` | password `1234` |
+
+- These accounts are (re)created automatically on every server start (`DatabaseManager.seedInitialData()`).
+- **Self-registered accounts are always `STUDENT`.** `ADMIN` is granted only by the seed or by a *verified* Google sign-in of an email listed in `ADMIN_EMAILS` — nobody can claim a lecturer address by registering with it.
+- Passwords are stored as salted `scrypt` hashes and never returned by the API. After login the server issues an HMAC-signed session token (7 days) stored in the browser.
+- **Google Sign-In** only works on origins registered in Google Cloud Console (e.g. `http://localhost:3000`). Phones opening the LAN IP (`http://192.168.x.x:3000`) should use email/password, or expose the app over a public HTTPS tunnel and register that origin.
+
+**Auth API:** `POST /api/auth/google` (`{ credential }`), `POST /api/auth/register` (`{ name, email, password }`), `POST /api/auth/login` (`{ email, password }`), `GET /api/auth/me` (`Authorization: Bearer <token>`).
 
 ---
 

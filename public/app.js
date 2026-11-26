@@ -82,56 +82,89 @@ async function initApp() {
 
   const res = await fetch('/api/auth/config');
   const data = await res.json();
-  renderDemoUsers(data.users || []);
+  state.googleClientId = data.googleClientId;
 
-  const savedUser = localStorage.getItem('liveclass_user');
-  if (savedUser) {
+  // Restore an existing session (signed server token) without re-prompting Google
+  const savedToken = localStorage.getItem('liveclass_token');
+  if (savedToken) {
     try {
-      const parsed = JSON.parse(savedUser);
-      await loginWithProfile(parsed);
+      const meRes = await fetch('/api/auth/me', { headers: { Authorization: `Bearer ${savedToken}` } });
+      if (meRes.ok) {
+        const me = await meRes.json();
+        await onSignedIn(me.user, savedToken);
+        return;
+      }
     } catch {
-      localStorage.removeItem('liveclass_user');
+      /* fall through to Google sign-in */
     }
+    localStorage.removeItem('liveclass_token');
+  }
+
+  initGoogleSignIn();
+}
+
+function showAuthError(msg) {
+  const el = document.getElementById('authError');
+  el.textContent = msg;
+  el.classList.toggle('hidden', !msg);
+}
+
+// Real Google Identity Services sign-in (ID token verified on the server)
+function initGoogleSignIn() {
+  if (!state.googleClientId) {
+    // Google sign-in not configured — email/password login still works
+    document.querySelector('.auth-divider')?.classList.add('hidden');
+    return;
+  }
+  if (!window.google || !window.google.accounts || !window.google.accounts.id) {
+    // GSI script is loaded async — retry shortly
+    setTimeout(initGoogleSignIn, 200);
+    return;
+  }
+  if (!state.gsiInitialized) {
+    google.accounts.id.initialize({
+      client_id: state.googleClientId,
+      callback: handleGoogleCredential,
+      auto_select: false,
+      ux_mode: 'popup'
+    });
+    state.gsiInitialized = true;
+  }
+  const container = document.getElementById('googleSignInButton');
+  container.innerHTML = '';
+  google.accounts.id.renderButton(container, {
+    type: 'standard',
+    theme: 'filled_blue',
+    size: 'large',
+    text: 'signin_with',
+    shape: 'pill',
+    logo_alignment: 'left'
+  });
+}
+
+async function handleGoogleCredential(response) {
+  showAuthError('');
+  try {
+    const res = await fetch('/api/auth/google', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ credential: response.credential })
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) {
+      showAuthError(data.error || 'Google sign-in failed');
+      return;
+    }
+    await onSignedIn(data.user, data.token);
+  } catch (err) {
+    showAuthError(`Google sign-in failed: ${err.message}`);
   }
 }
 
-function renderDemoUsers(users) {
-  const grid = document.getElementById('demoUsersGrid');
-  grid.innerHTML = '';
-  users.forEach((u) => {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'demo-user-btn';
-    btn.innerHTML = `
-      <img src="${u.picture}" class="avatar" alt="${u.name}" />
-      <div class="user-meta">
-        <strong>${u.name}</strong>
-        <span class="role-pill ${u.role.toLowerCase()}">${u.role}</span>
-      </div>
-    `;
-    btn.addEventListener('click', () => loginWithProfile(u));
-    grid.appendChild(btn);
-  });
-}
-
-document.getElementById('googleSignInForm').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const email = document.getElementById('loginEmail').value.trim();
-  const name = document.getElementById('loginName').value.trim();
-  await loginWithProfile({ email, name });
-});
-
-async function loginWithProfile(profile) {
-  const res = await fetch('/api/auth/google', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(profile)
-  });
-  const data = await res.json();
-  if (data.error) return alert(data.error);
-
-  state.user = data.user;
-  localStorage.setItem('liveclass_user', JSON.stringify(state.user));
+async function onSignedIn(user, token) {
+  state.user = user;
+  if (token) localStorage.setItem('liveclass_token', token);
+  localStorage.removeItem('liveclass_user');
 
   // If student scanned a QR link before logging in, auto-enroll & check-in immediately!
   if (state.pendingQrToken && state.user.role === 'STUDENT') {
@@ -142,21 +175,53 @@ async function loginWithProfile(profile) {
   await refreshDashboard();
 }
 
-// 1-Click Role Switcher (ADMIN <-> STUDENT)
-document.getElementById('btnSwitchRole').addEventListener('click', async () => {
-  if (!state.user) return;
-  const targetRole = state.user.role === 'ADMIN' ? 'STUDENT' : 'ADMIN';
-  const res = await fetch('/api/auth/role', {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ userId: state.user.id, role: targetRole })
+// Email + password sign-in / registration (no Gmail required)
+document.querySelectorAll('.auth-mode-btn').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const mode = btn.dataset.authmode;
+    document.querySelectorAll('.auth-mode-btn').forEach((b) => b.classList.toggle('active', b === btn));
+    document.getElementById('passwordLoginForm').classList.toggle('hidden', mode !== 'login');
+    document.getElementById('registerForm').classList.toggle('hidden', mode !== 'register');
+    showAuthError('');
   });
-  const data = await res.json();
-  if (data.user) {
-    state.user = data.user;
-    localStorage.setItem('liveclass_user', JSON.stringify(state.user));
-    await refreshDashboard();
+});
+
+async function submitPasswordAuth(url, payload) {
+  showAuthError('');
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) {
+      showAuthError(data.error || 'Sign-in failed');
+      return;
+    }
+    document.getElementById('passwordLoginForm').reset();
+    document.getElementById('registerForm').reset();
+    await onSignedIn(data.user, data.token);
+  } catch (err) {
+    showAuthError(`Sign-in failed: ${err.message}`);
   }
+}
+
+document.getElementById('passwordLoginForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  submitPasswordAuth('/api/auth/login', {
+    email: document.getElementById('loginEmail').value,
+    password: document.getElementById('loginPassword').value
+  });
+});
+
+document.getElementById('registerForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  submitPasswordAuth('/api/auth/register', {
+    name: document.getElementById('registerName').value,
+    email: document.getElementById('registerEmail').value,
+    password: document.getElementById('registerPassword').value
+  });
 });
 
 document.getElementById('btnEnableAlerts').addEventListener('click', async () => {
@@ -170,12 +235,33 @@ document.getElementById('btnEnableAlerts').addEventListener('click', async () =>
 });
 
 document.getElementById('btnLogout').addEventListener('click', () => {
+  localStorage.removeItem('liveclass_token');
   localStorage.removeItem('liveclass_user');
+  if (window.google && google.accounts && google.accounts.id) google.accounts.id.disableAutoSelect();
   state.user = null;
   document.getElementById('userControls').classList.add('hidden');
   document.getElementById('adminDashboard').classList.add('hidden');
   document.getElementById('studentDashboard').classList.add('hidden');
   document.getElementById('authScreen').classList.remove('hidden');
+  initGoogleSignIn();
+});
+
+document.getElementById('btnResetDemoData')?.addEventListener('click', async () => {
+  if (!confirm('Reset all courses, attendance, questions, polls, summaries, and homework to start a clean demo from zero?')) {
+    return;
+  }
+  await fetch('/api/admin/reset', { method: 'POST' });
+  state.activeCourseId = null;
+  state.activeSession = null;
+  state.activePoll = null;
+  await refreshDashboard();
+});
+
+socket.on('system:reset', async () => {
+  state.activeCourseId = null;
+  state.activeSession = null;
+  state.activePoll = null;
+  if (state.user) await refreshDashboard();
 });
 
 // ============================================================================
@@ -192,9 +278,6 @@ async function refreshDashboard() {
   const badge = document.getElementById('userRoleBadge');
   badge.textContent = state.user.role;
   badge.className = `role-pill ${state.user.role.toLowerCase()}`;
-
-  document.getElementById('switchTargetRole').textContent =
-    state.user.role === 'ADMIN' ? 'STUDENT' : 'ADMIN (Lecturer)';
 
   document.querySelectorAll('.admin-only').forEach((el) => {
     el.classList.toggle('hidden', state.user.role !== 'ADMIN');
@@ -213,13 +296,20 @@ async function refreshDashboard() {
 
   const courseSelect = document.getElementById('courseSelect');
   courseSelect.innerHTML = '';
-  listToUse.forEach((c) => {
+  if (listToUse.length === 0) {
     const opt = document.createElement('option');
-    opt.value = c.id;
-    opt.textContent = `${c.code} — ${c.name}`;
-    if (c.id === state.activeCourseId) opt.selected = true;
+    opt.value = '';
+    opt.textContent = 'No Courses Yet — Click "+ Course" ➡️';
     courseSelect.appendChild(opt);
-  });
+  } else {
+    listToUse.forEach((c) => {
+      const opt = document.createElement('option');
+      opt.value = c.id;
+      opt.textContent = `${c.code} — ${c.name}`;
+      if (c.id === state.activeCourseId) opt.selected = true;
+      courseSelect.appendChild(opt);
+    });
+  }
 
   if (state.user.role === 'ADMIN') {
     document.getElementById('studentDashboard').classList.add('hidden');
@@ -273,11 +363,30 @@ document.querySelectorAll('.tab-btn').forEach((btn) => {
   });
 });
 
+// Student Tabs Navigation (One Feature Per Tab)
+document.querySelectorAll('.student-tab-btn').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.student-tab-btn').forEach((b) => b.classList.remove('active'));
+    document.querySelectorAll('.stu-tab-panel').forEach((p) => p.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById(btn.dataset.stutab).classList.add('active');
+  });
+});
+
 // ============================================================================
 // 4. LECTURER (ADMIN) WORKFLOWS
 // ============================================================================
 async function loadAdminCourseData() {
-  if (!state.activeCourseId) return;
+  if (!state.activeCourseId) {
+    renderAdminSessionAndPhotoAudit(null);
+    populateStudentHistoryDropdown([]);
+    renderAttendanceHistoryMatrix({ sessions: [], students: [] });
+    renderAdminQuestions([]);
+    renderAdminPoll(null);
+    renderAdminSummaries([]);
+    await renderAdminAssignments([]);
+    return;
+  }
 
   const [sesRes, histRes, qaRes, pollRes, sumRes, assignRes] = await Promise.all([
     fetch(`/api/courses/${state.activeCourseId}/active-session`),
@@ -425,6 +534,10 @@ window.toggleManualStatus = async function (sessionId, studentId, newStatus) {
 };
 
 document.getElementById('btnStartSession').addEventListener('click', async () => {
+  if (!state.activeCourseId) {
+    document.getElementById('newCourseModal').classList.remove('hidden');
+    return alert('Create your first course to start a live class session!');
+  }
   const title =
     document.getElementById('newSessionTitle').value.trim() ||
     `Live Lecture (${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})`;
@@ -719,18 +832,16 @@ function renderAdminQuestions(questions) {
           <span>${q.created_at}</span>
         </div>
         <div class="qa-content">${q.content}</div>
-        ${
-          q.lecturer_reply
-            ? `<div class="qa-reply-box"><strong>👨‍🏫 Lecturer Reply:</strong> ${q.lecturer_reply}</div>`
-            : `
+        ${q.lecturer_reply
+          ? `<div class="qa-reply-box"><strong>👨‍🏫 Lecturer Reply:</strong> ${q.lecturer_reply}</div>`
+          : `
             <div class="qa-reply-form">
               <input type="text" id="replyInput_${q.id}" placeholder="Type written reply (for offline questions or course archive)..." />
               <button class="btn btn-sm btn-accent" onclick="sendLecturerReply(${q.id})">Send Reply</button>
-              ${
-                !q.is_dismissed
-                  ? `<button class="btn btn-sm btn-outline" onclick="dismissQuestion(${q.id})">✅ Answered Verbally (Dismiss)</button>`
-                  : ''
-              }
+              ${!q.is_dismissed
+            ? `<button class="btn btn-sm btn-outline" onclick="dismissQuestion(${q.id})">✅ Answered Verbally (Dismiss)</button>`
+            : ''
+          }
             </div>
           `
         }
@@ -830,11 +941,10 @@ function renderAdminPoll(poll) {
 
   box.innerHTML = `
     <div class="qr-projector-box" style="margin-bottom:16px">
-      ${
-        poll.qr_data_url
-          ? `<div class="qr-image-wrap"><img src="${poll.qr_data_url}" style="width:140px;height:140px" alt="Poll QR"/></div>`
-          : ''
-      }
+      ${poll.qr_data_url
+      ? `<div class="qr-image-wrap"><img src="${poll.qr_data_url}" style="width:140px;height:140px" alt="Poll QR"/></div>`
+      : ''
+    }
       <div>
         <span class="status-badge ${poll.is_active ? 'live' : 'closed'}">${poll.is_active ? '🟢 LIVE POLL' : 'CLOSED'}</span>
         <h4 class="mt-8">${poll.question}</h4>
@@ -1049,10 +1159,9 @@ async function loadAdminSubmissionsForSelected(assignmentId) {
           </div>
           ${s.score ? `<span class="status-pill PRESENT">LLM Benchmark: ${s.score}/100</span>` : ''}
         </div>
-        ${
-          s.repo_url
-            ? `<p>🔗 <strong>GitHub Repo:</strong> <a href="${s.repo_url}" target="_blank">${s.repo_url}</a></p>`
-            : ''
+        ${s.repo_url
+          ? `<p>🔗 <strong>GitHub Repo:</strong> <a href="${s.repo_url}" target="_blank">${s.repo_url}</a></p>`
+          : ''
         }
         ${s.file_name ? `<p>📄 <strong>Uploaded File:</strong> ${s.file_name}</p>` : ''}
         ${s.content ? `<div class="markdown-box">${s.content}</div>` : ''}
@@ -1061,13 +1170,12 @@ async function loadAdminSubmissionsForSelected(assignmentId) {
             🤖 ${s.llm_review ? 'Refresh LLM Review & Peer Comparison' : 'Run LLM Review & Peer Comparison'}
           </button>
         </div>
-        ${
-          s.llm_review
-            ? `
+        ${s.llm_review
+          ? `
             <div class="markdown-box mt-8"><strong>🤖 LLM Deep Review:</strong>\n${s.llm_review}</div>
             <div class="markdown-box mt-8"><strong>📊 Anonymous Comparison to Classmates:</strong>\n${s.llm_comparison}</div>
           `
-            : ''
+          : ''
         }
       </div>
     `
@@ -1089,7 +1197,14 @@ window.triggerLlmHomeworkAnalysis = async function (submissionId) {
 // ============================================================================
 async function loadStudentCourseData() {
   renderStudentEnrolledCourses();
-  if (!state.activeCourseId) return;
+  if (!state.activeCourseId) {
+    renderStudentSessionCheckIn(null);
+    renderStudentPoll(null);
+    renderStudentQuestions([]);
+    renderStudentSummaries([]);
+    await renderStudentAssignments([]);
+    return;
+  }
 
   const [sesRes, pollRes, qaRes, sumRes, assignRes] = await Promise.all([
     fetch(`/api/courses/${state.activeCourseId}/active-session`),
@@ -1119,6 +1234,10 @@ async function loadStudentCourseData() {
 function renderStudentEnrolledCourses() {
   const grid = document.getElementById('studentCoursesGrid');
   const list = state.courses.length > 0 ? state.courses : state.allCourses;
+  if (list.length === 0) {
+    grid.innerHTML = '<span class="text-muted">No courses enrolled yet — scan the Lecturer QR code to join!</span>';
+    return;
+  }
   grid.innerHTML = list
     .map(
       (c) => `
@@ -1242,10 +1361,9 @@ function renderStudentPoll(poll) {
   body.innerHTML = `
     <h4>${poll.question}</h4>
     <div class="student-poll-options">${optionsHtml}</div>
-    ${
-      poll.my_vote !== null
-        ? `<div class="alert alert-success mt-12">✅ Your vote has been recorded! Live bar-chart results are displayed on the lecturer's projector screen.</div>`
-        : ''
+    ${poll.my_vote !== null
+      ? `<div class="alert alert-success mt-12">✅ Your vote has been recorded! Live bar-chart results are displayed on the lecturer's projector screen.</div>`
+      : ''
     }
   `;
 }
@@ -1297,10 +1415,9 @@ function renderStudentQuestions(questions) {
           <span>${q.created_at}</span>
         </div>
         <div class="qa-content">${q.content}</div>
-        ${
-          q.lecturer_reply
-            ? `<div class="qa-reply-box"><strong>👨‍🏫 Lecturer Answer:</strong> ${q.lecturer_reply}</div>`
-            : `<small class="card-desc">${q.is_dismissed ? '✅ Answered verbally by lecturer in class' : '⏳ Waiting for lecturer response'}</small>`
+        ${q.lecturer_reply
+          ? `<div class="qa-reply-box"><strong>👨‍🏫 Lecturer Answer:</strong> ${q.lecturer_reply}</div>`
+          : `<small class="card-desc">${q.is_dismissed ? '✅ Answered verbally by lecturer in class' : '⏳ Waiting for lecturer response'}</small>`
         }
       </div>
     `
@@ -1362,19 +1479,17 @@ async function renderStudentAssignments(assignments) {
         </div>
 
         <form onsubmit="submitStudentHomework(event, ${a.id})">
-          ${
-            allowGithub
-              ? `
+          ${allowGithub
+        ? `
               <div class="form-group">
                 <label>🔗 GitHub Repository URL ${a.submission_type === 'GITHUB_ONLY' ? '(Required)' : ''}</label>
                 <input type="url" id="hwRepo_${a.id}" value="${mySub?.repo_url || ''}" placeholder="https://github.com/username/I2SE_Exe2" ${a.submission_type === 'GITHUB_ONLY' ? 'required' : ''} />
               </div>
             `
-              : ''
-          }
-          ${
-            allowFileText
-              ? `
+        : ''
+      }
+          ${allowFileText
+        ? `
               <div class="form-group">
                 <label>📄 Upload Homework File or Paste Solution / Design Summary</label>
                 <input type="file" onchange="loadHomeworkFileToText(event, ${a.id})" style="margin-bottom:8px" />
@@ -1382,33 +1497,31 @@ async function renderStudentAssignments(assignments) {
                 <textarea id="hwContent_${a.id}" rows="3" placeholder="Paste your code, architecture overview, or upload a file above...">${mySub?.content || ''}</textarea>
               </div>
             `
-              : ''
-          }
+        : ''
+      }
           <div class="form-split">
             <button type="submit" class="btn btn-primary">💾 Save / Upload My Homework</button>
-            ${
-              mySub
-                ? `
+            ${mySub
+        ? `
                 <button type="button" class="btn btn-accent" onclick="triggerLlmHomeworkAnalysis(${mySub.id})">
                   🤖 Get LLM Review &amp; Compare to Classmates (${allSubs.length} Submissions)
                 </button>
               `
-                : ''
-            }
+        : ''
+      }
           </div>
         </form>
 
-        ${
-          mySub?.llm_review
-            ? `
+        ${mySub?.llm_review
+        ? `
             <div class="alert alert-info mt-12">
               <strong>🎯 Estimated LLM Benchmark Score: ${mySub.score}/100</strong>
             </div>
             <div class="markdown-box mt-8"><strong>🤖 Your Individual LLM Deep Review:</strong>\n${mySub.llm_review}</div>
             <div class="markdown-box mt-8"><strong>📊 Anonymous Comparison to Other Students' Work:</strong>\n${mySub.llm_comparison}</div>
           `
-            : ''
-        }
+        : ''
+      }
       </div>
     `);
   }
