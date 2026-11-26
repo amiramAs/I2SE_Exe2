@@ -6,7 +6,7 @@ class PollService {
   /**
    * Creates an on-the-spot multiple-choice (American-style) poll for the active course/session
    */
-  createPoll(courseId, sessionId, question, options) {
+  createPoll(courseId, sessionId, question, options, allowMultiple = false) {
     if (!question || !question.trim()) {
       throw new Error('Poll question is required.');
     }
@@ -20,10 +20,10 @@ class PollService {
 
     const res = this.db
       .prepare(`
-        INSERT INTO polls (course_id, session_id, question, options_json, is_active)
-        VALUES (?, ?, ?, ?, 1)
+        INSERT INTO polls (course_id, session_id, question, options_json, allow_multiple, is_active)
+        VALUES (?, ?, ?, ?, ?, 1)
       `)
-      .run(courseId, sessionId || null, question.trim(), JSON.stringify(cleanOptions));
+      .run(courseId, sessionId || null, question.trim(), JSON.stringify(cleanOptions), allowMultiple ? 1 : 0);
 
     return this.getPollForLecturer(Number(res.lastInsertRowid));
   }
@@ -33,36 +33,70 @@ class PollService {
     return this.getPollForLecturer(pollId);
   }
 
+  _parseVoteIndices(voteRow) {
+    if (!voteRow) return [];
+    if (voteRow.option_indices_json) {
+      try {
+        const parsed = JSON.parse(voteRow.option_indices_json);
+        if (Array.isArray(parsed)) return parsed.map(Number);
+      } catch {
+        // fallback to option_index
+      }
+    }
+    return voteRow.option_index !== null && voteRow.option_index !== undefined
+      ? [Number(voteRow.option_index)]
+      : [];
+  }
+
   /**
    * Student casts a vote on a multiple-choice poll.
+   * Accepts either a single optionIndex (number) or an array of optionIndices (number[]).
    * Returns ONLY a vote confirmation for the student's phone (results are displayed only on the lecturer's projector screen).
    */
-  castVote(pollId, studentId, optionIndex) {
+  castVote(pollId, studentId, optionSelection) {
     const poll = this.db.prepare('SELECT * FROM polls WHERE id = ?').get(pollId);
     if (!poll) throw new Error('Poll not found.');
     if (!poll.is_active) throw new Error('This poll is already closed.');
 
     const options = JSON.parse(poll.options_json);
-    const idx = Number(optionIndex);
-    if (Number.isNaN(idx) || idx < 0 || idx >= options.length) {
-      throw new Error('Invalid poll option selected.');
+    const allowMultiple = Boolean(poll.allow_multiple);
+
+    const rawIndices = Array.isArray(optionSelection) ? optionSelection : [optionSelection];
+    const indices = [...new Set(rawIndices.map((x) => Number(x)))];
+
+    if (indices.length === 0) {
+      throw new Error('Please select at least one option.');
     }
+    if (!allowMultiple && indices.length > 1) {
+      throw new Error('This poll allows selecting only one option.');
+    }
+    for (const idx of indices) {
+      if (Number.isNaN(idx) || !Number.isInteger(idx) || idx < 0 || idx >= options.length) {
+        throw new Error('Invalid poll option selected.');
+      }
+    }
+
+    const primaryIdx = indices[0];
+    const indicesJson = JSON.stringify(indices);
 
     this.db
       .prepare(`
-        INSERT INTO poll_votes (poll_id, student_id, option_index)
-        VALUES (?, ?, ?)
+        INSERT INTO poll_votes (poll_id, student_id, option_index, option_indices_json)
+        VALUES (?, ?, ?, ?)
         ON CONFLICT(poll_id, student_id) DO UPDATE SET
           option_index = excluded.option_index,
+          option_indices_json = excluded.option_indices_json,
           voted_at = datetime('now')
       `)
-      .run(pollId, studentId, idx);
+      .run(pollId, studentId, primaryIdx, indicesJson);
 
     return {
       poll_id: Number(pollId),
       student_id: Number(studentId),
-      selected_option_index: idx,
-      selected_option_label: options[idx],
+      selected_option_index: primaryIdx,
+      selected_option_indices: indices,
+      selected_option_label: options[primaryIdx],
+      selected_option_labels: indices.map((i) => options[i]),
       voted: true,
       message: 'Your vote has been recorded! Live results are displayed on the lecturer projector screen.'
     };
@@ -79,9 +113,11 @@ class PollService {
 
     const existingVote = studentId
       ? this.db
-          .prepare('SELECT option_index FROM poll_votes WHERE poll_id = ? AND student_id = ?')
+          .prepare('SELECT option_index, option_indices_json FROM poll_votes WHERE poll_id = ? AND student_id = ?')
           .get(poll.id, studentId)
       : null;
+
+    const myVotes = this._parseVoteIndices(existingVote);
 
     return {
       id: poll.id,
@@ -89,8 +125,10 @@ class PollService {
       session_id: poll.session_id,
       question: poll.question,
       options: JSON.parse(poll.options_json),
+      allow_multiple: Boolean(poll.allow_multiple),
       is_active: Boolean(poll.is_active),
-      my_vote: existingVote ? existingVote.option_index : null
+      my_vote: myVotes.length > 0 ? myVotes[0] : null,
+      my_votes: myVotes
     };
   }
 
@@ -102,16 +140,21 @@ class PollService {
     if (!poll) return null;
 
     const options = JSON.parse(poll.options_json);
-    const votes = this.db
-      .prepare('SELECT option_index, COUNT(*) as cnt FROM poll_votes WHERE poll_id = ? GROUP BY option_index')
+    const voteRows = this.db
+      .prepare('SELECT option_index, option_indices_json FROM poll_votes WHERE poll_id = ?')
       .all(poll.id);
 
     const counts = new Array(options.length).fill(0);
-    let totalVotes = 0;
-    for (const v of votes) {
-      if (v.option_index >= 0 && v.option_index < counts.length) {
-        counts[v.option_index] = Number(v.cnt);
-        totalVotes += Number(v.cnt);
+    const totalVoters = voteRows.length;
+    let totalSelections = 0;
+
+    for (const row of voteRows) {
+      const indices = this._parseVoteIndices(row);
+      for (const idx of indices) {
+        if (idx >= 0 && idx < counts.length) {
+          counts[idx] += 1;
+          totalSelections += 1;
+        }
       }
     }
 
@@ -119,7 +162,7 @@ class PollService {
       option_index: index,
       label,
       count: counts[index],
-      percentage: totalVotes > 0 ? Math.round((counts[index] / totalVotes) * 100) : 0
+      percentage: totalVoters > 0 ? Math.round((counts[index] / totalVoters) * 100) : 0
     }));
 
     return {
@@ -128,8 +171,10 @@ class PollService {
       session_id: poll.session_id,
       question: poll.question,
       options,
+      allow_multiple: Boolean(poll.allow_multiple),
       is_active: Boolean(poll.is_active),
-      total_votes: totalVotes,
+      total_votes: totalVoters,
+      total_selections: totalSelections,
       results: breakdown,
       created_at: poll.created_at
     };

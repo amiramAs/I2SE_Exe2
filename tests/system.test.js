@@ -8,6 +8,7 @@ const QAService = require('../src/services/QAService');
 const PollService = require('../src/services/PollService');
 const LLMService = require('../src/services/LLMService');
 const HomeworkService = require('../src/services/HomeworkService');
+const UserManagementService = require('../src/services/UserManagementService');
 
 describe('LiveClass AI — End-to-End Software Components & OOP Classes Verification (Task 9)', () => {
   let dbManager;
@@ -17,6 +18,7 @@ describe('LiveClass AI — End-to-End Software Components & OOP Classes Verifica
   let pollService;
   let llmService;
   let homeworkService;
+  let userManagementService;
 
   let lecturer;
   let student1;
@@ -33,6 +35,7 @@ describe('LiveClass AI — End-to-End Software Components & OOP Classes Verifica
     pollService = new PollService(dbManager);
     llmService = new LLMService(dbManager, '');
     homeworkService = new HomeworkService(dbManager, llmService);
+    userManagementService = new UserManagementService(dbManager);
   });
 
   after(() => {
@@ -176,17 +179,52 @@ describe('LiveClass AI — End-to-End Software Components & OOP Classes Verifica
     assert.equal(offlineQ.is_live, false);
     assert.equal(offlineQ.display_author, 'Student Two');
 
-    const replied = qaService.replyToQuestion(offlineQ.id, 'Yes, study the WebSocket sequence flow!');
+    const replied = qaService.replyToQuestion(offlineQ.id, 'Yes, study the WebSocket sequence flow!', {
+      id: lecturer.id,
+      name: lecturer.name,
+      role: 'ADMIN'
+    });
     assert.equal(replied.lecturer_reply, 'Yes, study the WebSocket sequence flow!');
+    assert.equal(replied.status, 'ANSWERED_WRITTEN');
+    assert.equal(replied.replies.length, 1);
+    assert.equal(replied.replies[0].author_role, 'ADMIN');
+
+    // Follow-up reply in the thread
+    const followUp = qaService.replyToQuestion(offlineQ.id, 'Thank you professor!', {
+      id: student2.id,
+      name: student2.name,
+      role: 'STUDENT'
+    });
+    assert.equal(followUp.replies.length, 2);
+
+    // Lecturer Question History & Filtering
+    const fullHistory = qaService.getQuestionHistory({ courseId: course.id });
+    assert.equal(fullHistory.stats.total, 2);
+    assert.equal(fullHistory.stats.live_count, 1);
+    assert.equal(fullHistory.stats.offline_count, 1);
+    assert.equal(fullHistory.stats.replied_count, 1);
+    assert.equal(fullHistory.stats.verbal_count, 1);
+
+    const writtenOnly = qaService.getQuestionHistory({ courseId: course.id, status: 'ANSWERED_WRITTEN' });
+    assert.equal(writtenOnly.questions.length, 1);
+    assert.equal(writtenOnly.questions[0].id, offlineQ.id);
+
+    const anonOnly = qaService.getQuestionHistory({ courseId: course.id, studentId: 'ANONYMOUS' });
+    assert.equal(anonOnly.questions.length, 1);
+    assert.equal(anonOnly.questions[0].id, liveQ.id);
+
+    const csv = qaService.exportQuestionsCSV({ courseId: course.id });
+    assert.ok(csv.includes('WebSocket sequence flow'));
   });
 
-  test('TC-POLL-01..02: PollService runs Multiple-Choice KISS Polls with student vote confirmation and projector-only results', () => {
+  test('TC-POLL-01..02: PollService runs Single & Multiple-Choice Polls with student vote confirmation and projector-only results', () => {
     const poll = pollService.createPoll(course.id, session1.id, 'Is the UML Class Diagram clear?', [
       'Yes, 100%',
       'Need one more example',
       'No'
     ]);
     assert.equal(poll.options.length, 3);
+    assert.equal(poll.allow_multiple, false);
 
     // Student 1 votes for option 0
     const voteConfirm = pollService.castVote(poll.id, student1.id, 0);
@@ -194,11 +232,39 @@ describe('LiveClass AI — End-to-End Software Components & OOP Classes Verifica
     assert.equal(voteConfirm.selected_option_index, 0);
     assert.equal(voteConfirm.results, undefined, 'Student confirmation must not leak live bar-chart results');
 
+    // Single-choice poll must reject selecting multiple options
+    assert.throws(() => pollService.castVote(poll.id, student1.id, [0, 1]), /only one option/);
+
     // Lecturer projector view receives full breakdown
     const lecturerView = pollService.getPollForLecturer(poll.id);
     assert.equal(lecturerView.total_votes, 1);
     assert.equal(lecturerView.results[0].count, 1);
     assert.equal(lecturerView.results[0].percentage, 100);
+
+    // Multi-choice poll allowing students to select more than one option
+    const multiPoll = pollService.createPoll(
+      course.id,
+      session1.id,
+      'Which design patterns did we use today?',
+      ['Strategy', 'Observer', 'Singleton', 'Factory'],
+      true
+    );
+    assert.equal(multiPoll.allow_multiple, true);
+
+    const multiConfirm = pollService.castVote(multiPoll.id, student1.id, [0, 1]);
+    assert.deepEqual(multiConfirm.selected_option_indices, [0, 1]);
+    assert.deepEqual(multiConfirm.selected_option_labels, ['Strategy', 'Observer']);
+
+    const studentMultiView = pollService.getActivePollForStudent(course.id, student1.id);
+    assert.equal(studentMultiView.allow_multiple, true);
+    assert.deepEqual(studentMultiView.my_votes, [0, 1]);
+
+    const lecturerMultiView = pollService.getPollForLecturer(multiPoll.id);
+    assert.equal(lecturerMultiView.total_votes, 1);
+    assert.equal(lecturerMultiView.total_selections, 2);
+    assert.equal(lecturerMultiView.results[0].count, 1);
+    assert.equal(lecturerMultiView.results[1].count, 1);
+    assert.equal(lecturerMultiView.results[2].count, 0);
   });
 
   test('TC-LLM-01..02: LLMService generates draft lecture summary integrating live Q&A and publishes after lecturer approval', async () => {
@@ -265,5 +331,38 @@ describe('LiveClass AI — End-to-End Software Components & OOP Classes Verifica
     assert.ok(analyzed.llm_review.includes('Deep Architectural'));
     assert.ok(analyzed.llm_comparison.includes('1 Peer Submission'));
     assert.ok(analyzed.score >= 75);
+  });
+
+  test('TC-UM-01..03: UserManagementService lists users, retrieves full student activity profile, manages course enrollments, and enforces role change safeguards', () => {
+    const allUsers = userManagementService.listUsers();
+    assert.ok(allUsers.length >= 3);
+
+    // Inspect student1's full activity profile (attendance, questions, poll votes, homework submissions)
+    const profile1 = userManagementService.getUserProfile(student1.id);
+    assert.equal(profile1.user.id, student1.id);
+    assert.equal(profile1.enrolledCourses.length, 1);
+    assert.equal(profile1.attendance.length, 1);
+    assert.equal(profile1.attendanceSummary.present, 1);
+    assert.equal(profile1.questions.length, 1);
+    assert.ok(profile1.pollVotes.length >= 2);
+    assert.equal(profile1.submissions.length, 1);
+    assert.equal(profile1.submissions[0].has_review, true);
+
+    // Admin cannot remove their own ADMIN role
+    assert.throws(() => {
+      userManagementService.setUserRole(lecturer.id, lecturer.id, 'STUDENT');
+    }, /cannot remove your own ADMIN role/);
+
+    // Promote student2 to ADMIN and demote back to STUDENT
+    const promoted = userManagementService.setUserRole(lecturer.id, student2.id, 'ADMIN');
+    assert.equal(promoted.role, 'ADMIN');
+    const demoted = userManagementService.setUserRole(lecturer.id, student2.id, 'STUDENT');
+    assert.equal(demoted.role, 'STUDENT');
+
+    // Unenroll and re-enroll student2 in course
+    const afterUnenroll = userManagementService.unenrollUser(student2.id, course.id);
+    assert.equal(afterUnenroll.enrolledCourses.length, 0);
+    const afterEnroll = userManagementService.enrollUser(student2.id, course.id);
+    assert.equal(afterEnroll.enrolledCourses.length, 1);
   });
 });

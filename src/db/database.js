@@ -86,10 +86,23 @@ class DatabaseManager {
         is_live INTEGER NOT NULL DEFAULT 1,
         is_dismissed INTEGER NOT NULL DEFAULT 0,
         lecturer_reply TEXT,
+        replied_at TEXT,
         created_at TEXT DEFAULT (datetime('now')),
         FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE CASCADE,
         FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL,
         FOREIGN KEY (student_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS question_replies (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        question_id INTEGER NOT NULL,
+        user_id INTEGER,
+        author_name TEXT NOT NULL,
+        author_role TEXT NOT NULL DEFAULT 'ADMIN',
+        content TEXT NOT NULL,
+        created_at TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (question_id) REFERENCES questions(id) ON DELETE CASCADE,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
       );
 
       CREATE TABLE IF NOT EXISTS polls (
@@ -98,6 +111,7 @@ class DatabaseManager {
         session_id INTEGER,
         question TEXT NOT NULL,
         options_json TEXT NOT NULL,
+        allow_multiple INTEGER NOT NULL DEFAULT 0,
         is_active INTEGER NOT NULL DEFAULT 1,
         created_at TEXT DEFAULT (datetime('now')),
         FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE CASCADE,
@@ -109,6 +123,7 @@ class DatabaseManager {
         poll_id INTEGER NOT NULL,
         student_id INTEGER NOT NULL,
         option_index INTEGER NOT NULL,
+        option_indices_json TEXT,
         voted_at TEXT DEFAULT (datetime('now')),
         UNIQUE(poll_id, student_id),
         FOREIGN KEY (poll_id) REFERENCES polls(id) ON DELETE CASCADE,
@@ -161,6 +176,21 @@ class DatabaseManager {
     if (!userCols.includes('password_hash')) {
       this.db.exec('ALTER TABLE users ADD COLUMN password_hash TEXT');
     }
+
+    const questionCols = this.db.prepare('PRAGMA table_info(questions)').all().map((c) => c.name);
+    if (!questionCols.includes('replied_at')) {
+      this.db.exec('ALTER TABLE questions ADD COLUMN replied_at TEXT');
+    }
+
+    const pollCols = this.db.prepare('PRAGMA table_info(polls)').all().map((c) => c.name);
+    if (!pollCols.includes('allow_multiple')) {
+      this.db.exec('ALTER TABLE polls ADD COLUMN allow_multiple INTEGER NOT NULL DEFAULT 0');
+    }
+
+    const pollVoteCols = this.db.prepare('PRAGMA table_info(poll_votes)').all().map((c) => c.name);
+    if (!pollVoteCols.includes('option_indices_json')) {
+      this.db.exec('ALTER TABLE poll_votes ADD COLUMN option_indices_json TEXT');
+    }
   }
 
   seedInitialData() {
@@ -211,6 +241,7 @@ class DatabaseManager {
     this.db.exec(`
       DELETE FROM poll_votes;
       DELETE FROM polls;
+      DELETE FROM question_replies;
       DELETE FROM questions;
       DELETE FROM attendance;
       DELETE FROM lecture_summaries;

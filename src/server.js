@@ -14,6 +14,7 @@ const QAService = require('./services/QAService');
 const PollService = require('./services/PollService');
 const LLMService = require('./services/LLMService');
 const HomeworkService = require('./services/HomeworkService');
+const UserManagementService = require('./services/UserManagementService');
 
 function getLocalLanIp() {
   const nets = os.networkInterfaces();
@@ -37,6 +38,7 @@ function createApp(dbPath) {
   const pollService = new PollService(dbManager);
   const llmService = new LLMService(dbManager);
   const homeworkService = new HomeworkService(dbManager, llmService);
+  const userManagementService = new UserManagementService(dbManager);
 
   const app = express();
   const server = http.createServer(app);
@@ -105,6 +107,69 @@ function createApp(dbPath) {
       res.json({ user, token: authService.issueSessionToken(user) });
     } catch (err) {
       res.status(401).json({ error: err.message });
+    }
+  });
+
+  // ============================================================================
+  // 1b. ADMIN USER MANAGEMENT (server-side ADMIN check via signed session token)
+  // ============================================================================
+  function requireAdmin(req, res, next) {
+    const header = req.headers.authorization || '';
+    const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+    const actor = authService.getUserFromSessionToken(token);
+    if (!actor) return res.status(401).json({ error: 'Please sign in again' });
+    if (actor.role !== 'ADMIN') return res.status(403).json({ error: 'Admin access required' });
+    req.actor = actor;
+    next();
+  }
+
+  function sendUserMgmtError(res, err) {
+    const status = err.message === 'User not found' || err.message === 'Course not found' ? 404 : 400;
+    res.status(status).json({ error: err.message });
+  }
+
+  app.get('/api/admin/users', requireAdmin, (req, res) => {
+    res.json({ users: userManagementService.listUsers(), courses: userManagementService.listAllCourses() });
+  });
+
+  app.get('/api/admin/users/:id', requireAdmin, (req, res) => {
+    try {
+      res.json(userManagementService.getUserProfile(Number(req.params.id)));
+    } catch (err) {
+      sendUserMgmtError(res, err);
+    }
+  });
+
+  app.patch('/api/admin/users/:id/role', requireAdmin, (req, res) => {
+    try {
+      const userId = Number(req.params.id);
+      const user = userManagementService.setUserRole(req.actor.id, userId, req.body && req.body.role);
+      io.emit('user:updated', { userId });
+      res.json({ user });
+    } catch (err) {
+      sendUserMgmtError(res, err);
+    }
+  });
+
+  app.post('/api/admin/users/:id/enrollments', requireAdmin, (req, res) => {
+    try {
+      const userId = Number(req.params.id);
+      const profile = userManagementService.enrollUser(userId, Number(req.body && req.body.courseId));
+      io.emit('user:updated', { userId });
+      res.json(profile);
+    } catch (err) {
+      sendUserMgmtError(res, err);
+    }
+  });
+
+  app.delete('/api/admin/users/:id/enrollments/:courseId', requireAdmin, (req, res) => {
+    try {
+      const userId = Number(req.params.id);
+      const profile = userManagementService.unenrollUser(userId, Number(req.params.courseId));
+      io.emit('user:updated', { userId });
+      res.json(profile);
+    } catch (err) {
+      sendUserMgmtError(res, err);
     }
   });
 
@@ -268,7 +333,7 @@ function createApp(dbPath) {
   });
 
   // ============================================================================
-  // 4. FEATURE 2: LIVE & OFFLINE Q&A (PROJECTOR POPUP + ANONYMOUS SUPPORT)
+  // 4. FEATURE 2: LIVE & OFFLINE Q&A (PROJECTOR POPUP + ANONYMOUS + HISTORY + PUSH)
   // ============================================================================
   app.get('/api/courses/:courseId/questions', (req, res) => {
     try {
@@ -276,6 +341,40 @@ function createApp(dbPath) {
       res.json({ questions });
     } catch (err) {
       res.status(400).json({ error: err.message });
+    }
+  });
+
+  app.get('/api/questions/history', (req, res) => {
+    try {
+      const history = qaService.getQuestionHistory({
+        courseId: req.query.courseId ? Number(req.query.courseId) : null,
+        lecturerId: req.query.lecturerId ? Number(req.query.lecturerId) : null,
+        sessionId: req.query.sessionId || null,
+        studentId: req.query.studentId || null,
+        status: req.query.status || null,
+        search: req.query.search || null
+      });
+      res.json(history);
+    } catch (err) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  app.get('/api/questions/history-export.csv', (req, res) => {
+    try {
+      const csv = qaService.exportQuestionsCSV({
+        courseId: req.query.courseId ? Number(req.query.courseId) : null,
+        lecturerId: req.query.lecturerId ? Number(req.query.lecturerId) : null,
+        sessionId: req.query.sessionId || null,
+        studentId: req.query.studentId || null,
+        status: req.query.status || null,
+        search: req.query.search || null
+      });
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', 'attachment; filename="questions_history.csv"');
+      res.send(csv);
+    } catch (err) {
+      res.status(400).send(err.message);
     }
   });
 
@@ -308,8 +407,48 @@ function createApp(dbPath) {
 
   app.patch('/api/questions/:id/reply', (req, res) => {
     try {
-      const question = qaService.replyToQuestion(Number(req.params.id), req.body.replyText);
+      const authorUser = req.body.userId
+        ? {
+            id: Number(req.body.userId),
+            name: req.body.authorName,
+            role: req.body.authorRole || 'ADMIN'
+          }
+        : null;
+      const question = qaService.replyToQuestion(Number(req.params.id), req.body.replyText, authorUser);
+      const latestReply = question.replies[question.replies.length - 1] || {
+        author_name: authorUser?.name || 'Lecturer',
+        author_role: authorUser?.role || 'ADMIN',
+        content: req.body.replyText
+      };
       io.emit('question:updated', question);
+      io.emit('question:replied', {
+        question,
+        reply: latestReply,
+        target_student_id: question.student_id,
+        replier_id: authorUser?.id || null
+      });
+      res.json({ question });
+    } catch (err) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/questions/:id/replies', (req, res) => {
+    try {
+      const authorUser = {
+        id: req.body.userId ? Number(req.body.userId) : null,
+        name: req.body.authorName || 'Lecturer',
+        role: req.body.authorRole || 'ADMIN'
+      };
+      const question = qaService.replyToQuestion(Number(req.params.id), req.body.replyText, authorUser);
+      const latestReply = question.replies[question.replies.length - 1];
+      io.emit('question:updated', question);
+      io.emit('question:replied', {
+        question,
+        reply: latestReply,
+        target_student_id: question.student_id,
+        replier_id: authorUser.id
+      });
       res.json({ question });
     } catch (err) {
       res.status(400).json({ error: err.message });
@@ -506,7 +645,7 @@ function createApp(dbPath) {
     }
   });
 
-  return { app, server, io, dbManager, services: { authService, attendanceService, qaService, pollService, llmService, homeworkService } };
+  return { app, server, io, dbManager, services: { authService, attendanceService, qaService, pollService, llmService, homeworkService, userManagementService } };
 }
 
 if (require.main === module) {

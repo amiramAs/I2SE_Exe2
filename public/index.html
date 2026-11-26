@@ -41,18 +41,26 @@
     </div>
   </header>
 
+  <!-- FLOATING IN-APP PUSH TOAST CONTAINER -->
+  <div id="pushToastContainer" class="push-toast-container"></div>
+
   <!-- LIVE QUESTION PROJECTOR POPUP MODAL -->
   <div id="liveQuestionModal" class="projector-modal hidden">
     <div class="projector-modal-card">
       <div class="projector-modal-header">
         <span class="pulse-dot"></span>
-        <h2>✋ Live Question</h2>
+        <h2 id="liveModalTitle">✋ New Student Question</h2>
         <span id="liveModalAuthor" class="author-tag"></span>
       </div>
+      <div id="liveModalCourseMeta" class="text-muted" style="margin-bottom:8px"></div>
       <p id="liveModalContent" class="projector-question-text"></p>
+      <div class="qa-reply-form" style="margin-bottom:14px">
+        <input type="text" id="liveModalReplyInput" placeholder="Write a reply to send a push notification to the student..." />
+        <button id="btnReplyLiveQuestion" class="btn btn-accent">💬 Send Reply</button>
+      </div>
       <div class="projector-modal-actions">
         <button id="btnDismissLiveQuestion" class="btn btn-primary btn-lg">
-          ✅ Got it / Dismiss
+          ✅ Answered Verbally / Dismiss
         </button>
       </div>
     </div>
@@ -126,7 +134,33 @@
       <button class="tab-btn" data-tab="admin-polls">📊 3. Polls</button>
       <button class="tab-btn" data-tab="admin-summary">🎙️ 4. Lecture Summary</button>
       <button class="tab-btn" data-tab="admin-homework">📂 5. Homework</button>
+      <button class="tab-btn" data-tab="admin-users">👥 6. Users</button>
     </nav>
+
+    <!-- TAB 6: USER MANAGEMENT (all users, roles, courses & full per-user activity) -->
+    <section id="admin-users" class="tab-panel">
+      <div class="card">
+        <div class="card-header">
+          <h3>👥 User Management</h3>
+          <div class="row-actions">
+            <input type="text" id="umSearch" placeholder="Search name or email..." style="width:220px" />
+            <select id="umRoleFilter" class="select-input" style="width:140px">
+              <option value="">All Roles</option>
+              <option value="ADMIN">ADMIN</option>
+              <option value="STUDENT">STUDENT</option>
+            </select>
+            <button id="umRefresh" class="btn btn-sm btn-outline">🔄 Refresh</button>
+          </div>
+        </div>
+        <div id="umError" class="alert alert-danger hidden"></div>
+        <div class="um-layout">
+          <div id="umUserList" class="um-user-list"></div>
+          <div id="umUserDetail" class="um-user-detail">
+            <p class="text-muted">Select a user to view and manage their details.</p>
+          </div>
+        </div>
+      </div>
+    </section>
 
     <!-- TAB 1: ATTENDANCE -->
     <section id="admin-attendance" class="tab-panel active">
@@ -230,16 +264,45 @@
       </div>
     </section>
 
-    <!-- TAB 2: QUESTIONS -->
+    <!-- TAB 2: QUESTIONS & QUESTION HISTORY -->
     <section id="admin-qa" class="tab-panel">
       <div class="card">
         <div class="card-header">
-          <h3>💬 Student Questions (Live &amp; Post-Class)</h3>
+          <div>
+            <h3>💬 Student Questions &amp; Full Question History</h3>
+            <span class="text-muted">OS Push Notifications alert you even when you are outside the site (e.g. presenting slides). Replying sends an OS Push to the student who asked.</span>
+          </div>
           <div class="row-actions">
-            <button id="btnEnableAlerts" class="btn btn-sm btn-outline">🔔 Enable Sound &amp; Popups</button>
+            <button id="btnEnableAlerts" class="btn btn-sm btn-outline">🔔 Enable Sound &amp; OS Push</button>
             <button id="btnTestAudioChime" class="btn btn-sm btn-outline">🔊 Test Sound</button>
+            <button id="btnExportQuestionsCsv" class="btn btn-sm btn-outline">📥 Export History CSV</button>
           </div>
         </div>
+
+        <!-- Question History Filters -->
+        <div class="qa-history-filters">
+          <select id="qaHistoryScopeFilter" class="select-input">
+            <option value="COURSE">Current Course History</option>
+            <option value="ALL">All My Courses History</option>
+          </select>
+          <select id="qaHistorySessionFilter" class="select-input">
+            <option value="">All Lectures &amp; Offline</option>
+            <option value="LIVE">🔴 Asked Live in Class Only</option>
+            <option value="OFFLINE">🌙 Asked Offline After Class Only</option>
+          </select>
+          <select id="qaHistoryStatusFilter" class="select-input">
+            <option value="">All Statuses</option>
+            <option value="PENDING">⏳ Pending (Unanswered)</option>
+            <option value="ANSWERED_WRITTEN">💬 Answered with Written Reply</option>
+            <option value="ANSWERED_VERBAL">✅ Answered Verbally in Class</option>
+          </select>
+          <select id="qaHistoryStudentFilter" class="select-input">
+            <option value="">All Students &amp; Anonymous</option>
+            <option value="ANONYMOUS">🕵️ Anonymous Questions Only</option>
+          </select>
+          <input type="text" id="qaHistorySearchInput" placeholder="🔍 Search questions or replies..." />
+        </div>
+
         <div id="adminQuestionsList" class="qa-feed"></div>
       </div>
     </section>
@@ -255,11 +318,17 @@
               <input type="text" id="pollQuestionInput" placeholder="Type your question..." required />
             </div>
             <div class="form-group">
-              <label>Options (one per line)</label>
-              <textarea id="pollOptionsInput" rows="4" required>Option A
-Option B
-Option C
-Option D</textarea>
+              <div class="poll-options-header">
+                <label>Options</label>
+                <button type="button" id="btnAddPollOption" class="btn btn-sm btn-outline" title="Add another option">+ Add Option</button>
+              </div>
+              <div id="pollOptionsList" class="poll-options-builder"></div>
+            </div>
+            <div class="form-group">
+              <label class="checkbox-label">
+                <input type="checkbox" id="pollAllowMultipleInput" />
+                <span>Allow students to select multiple options</span>
+              </label>
             </div>
             <button type="submit" class="btn btn-primary">🚀 Open Poll</button>
           </form>
@@ -358,7 +427,7 @@ Option D</textarea>
     <!-- 5 Feature Tabs for Student -->
     <nav class="feature-tabs">
       <button class="student-tab-btn active" data-stutab="stu-attendance">📍 1. Attendance</button>
-      <button class="student-tab-btn" data-stutab="stu-qa">💬 2. Ask Question</button>
+      <button class="student-tab-btn" data-stutab="stu-qa">💬 2. Ask Question <span id="studentQaBadge" class="badge hidden">0</span></button>
       <button class="student-tab-btn" data-stutab="stu-polls">📊 3. Poll</button>
       <button class="student-tab-btn" data-stutab="stu-summary">📝 4. Summaries</button>
       <button class="student-tab-btn" data-stutab="stu-homework">📂 5. Homework</button>
@@ -386,7 +455,13 @@ Option D</textarea>
     <!-- STUDENT TAB 2: QUESTIONS -->
     <section id="stu-qa" class="stu-tab-panel">
       <div class="card">
-        <h3>✋ Ask the Lecturer a Question</h3>
+        <div class="card-header">
+          <div>
+            <h3>✋ Ask the Lecturer a Question</h3>
+            <span class="text-muted">You will receive an OS Push Notification as soon as your question receives a reply!</span>
+          </div>
+          <button type="button" id="btnStudentEnablePush" class="btn btn-sm btn-outline">🔔 Enable OS Push Alerts</button>
+        </div>
         <form id="studentAskForm" class="stack-form mt-12">
           <textarea id="studentQuestionInput" rows="3" placeholder="Write your question here..." required></textarea>
           <div class="form-split">
@@ -449,6 +524,7 @@ Option D</textarea>
   </div>
 
   <script src="app.js"></script>
+  <script src="users-admin.js"></script>
 </body>
 
 </html>

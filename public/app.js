@@ -17,7 +17,9 @@ const state = {
   webcamStream: null,
   speechRecognition: null,
   isRecording: false,
-  currentLiveModalQuestionId: null
+  currentLiveModalQuestionId: null,
+  swRegistration: null,
+  unreadStudentReplies: 0
 };
 
 // Parse URL query parameters (?qr=TOKEN&courseId=1 or ?pollId=1)
@@ -57,16 +59,138 @@ function playQuestionAlertChime() {
   }
 }
 
-function triggerDesktopNotification(title, body) {
-  if ('Notification' in window && Notification.permission === 'granted') {
-    const n = new Notification(title, {
-      body,
-      icon: 'https://ui-avatars.com/api/?name=Q+A&background=dc2626&color=fff'
-    });
+function showInAppPushToast(title, body, variant = 'default', onClick = null) {
+  const container = document.getElementById('pushToastContainer');
+  if (!container) return;
+  const toast = document.createElement('div');
+  toast.className = `push-toast ${variant}`;
+  toast.innerHTML = `
+    <div class="push-toast-title">
+      <span>${title}</span>
+      <span style="font-size:0.75rem;opacity:0.7">✕</span>
+    </div>
+    <div class="push-toast-body">${body}</div>
+  `;
+  toast.addEventListener('click', () => {
+    if (typeof onClick === 'function') onClick();
+    toast.remove();
+  });
+  container.appendChild(toast);
+  setTimeout(() => {
+    if (toast.parentNode) toast.remove();
+  }, 9000);
+}
+
+async function initServiceWorkerAndNotifications() {
+  // Automatically request OS Push permission on the first click anywhere in the app
+  const requestOnFirstGesture = () => {
+    if (state.user && 'Notification' in window && Notification.permission === 'default') {
+      ensureNotificationPermission(true);
+    }
+  };
+  document.addEventListener('click', requestOnFirstGesture, { passive: true });
+
+  if ('serviceWorker' in navigator) {
+    try {
+      state.swRegistration = await navigator.serviceWorker.register('/sw.js');
+      navigator.serviceWorker.addEventListener('message', async (event) => {
+        if (event.data && event.data.type === 'NOTIFICATION_CLICKED') {
+          const data = event.data.data || {};
+          if (data.courseId && state.activeCourseId !== Number(data.courseId)) {
+            state.activeCourseId = Number(data.courseId);
+            await refreshDashboard();
+          }
+          if (state.user?.role === 'ADMIN') {
+            document.querySelector('.tab-btn[data-tab="admin-qa"]')?.click();
+          } else if (state.user?.role === 'STUDENT') {
+            document.querySelector('.student-tab-btn[data-stutab="stu-qa"]')?.click();
+          }
+        }
+      });
+    } catch (e) {
+      console.warn('Service Worker registration warning:', e);
+    }
+  }
+  updatePushPermissionButtons();
+}
+
+function updatePushPermissionButtons() {
+  const granted = 'Notification' in window && Notification.permission === 'granted';
+  const adminBtn = document.getElementById('btnEnableAlerts');
+  if (adminBtn) {
+    adminBtn.textContent = granted ? '🔔 OS Push & Sound Active ✅' : '🔔 Enable Sound & OS Push';
+  }
+  const stuBtn = document.getElementById('btnStudentEnablePush');
+  if (stuBtn) {
+    stuBtn.textContent = granted ? '🔔 OS Push Alerts Active ✅' : '🔔 Enable OS Push Alerts';
+  }
+}
+
+async function ensureNotificationPermission(silent = false) {
+  if (!('Notification' in window)) return false;
+  if (Notification.permission === 'granted') {
+    updatePushPermissionButtons();
+    return true;
+  }
+  if (Notification.permission !== 'denied' || !silent) {
+    try {
+      const perm = await Notification.requestPermission();
+      updatePushPermissionButtons();
+      return perm === 'granted';
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+async function triggerDesktopNotification(title, body, meta = {}) {
+  if (!('Notification' in window)) return;
+
+  if (Notification.permission === 'default') {
+    await ensureNotificationPermission(true);
+  }
+
+  if (Notification.permission !== 'granted') return;
+
+  const onClickHandler = typeof meta.onClick === 'function' ? meta.onClick : null;
+  // IMPORTANT: options.data must only contain structured-cloneable primitives (never functions!)
+  const safeData = {
+    courseId: meta.courseId || null,
+    questionId: meta.questionId || null,
+    url: window.location.href
+  };
+
+  const options = {
+    body,
+    icon: 'https://ui-avatars.com/api/?name=Q+A&background=2563eb&color=fff',
+    badge: 'https://ui-avatars.com/api/?name=Q+A&background=dc2626&color=fff',
+    tag: meta.tag || `liveclass-qa-${Date.now()}`,
+    renotify: true,
+    requireInteraction: true,
+    data: safeData
+  };
+
+  // 1. Try direct window Notification first (fires immediately even when tab is in the background on desktop)
+  try {
+    const n = new Notification(title, options);
     n.onclick = () => {
       window.focus();
+      if (onClickHandler) onClickHandler();
       n.close();
     };
+    return;
+  } catch {
+    // 2. Fallback to Service Worker registration.showNotification (e.g. mobile browsers)
+  }
+
+  try {
+    const reg = state.swRegistration || (await navigator.serviceWorker?.getRegistration());
+    if (reg && typeof reg.showNotification === 'function') {
+      await reg.showNotification(title, options);
+    }
+  } catch (e) {
+    console.warn('Notification error:', e);
   }
 }
 
@@ -74,6 +198,8 @@ function triggerDesktopNotification(title, body) {
 // 2. INITIALIZATION & GOOGLE OAUTH / DEMO ACCOUNTS
 // ============================================================================
 async function initApp() {
+  await initServiceWorkerAndNotifications();
+
   if (state.pendingQrToken) {
     const notice = document.getElementById('qrScanNotice');
     notice.classList.remove('hidden');
@@ -166,6 +292,9 @@ async function onSignedIn(user, token) {
   if (token) localStorage.setItem('liveclass_token', token);
   localStorage.removeItem('liveclass_user');
 
+  // Auto-request OS Push Notification permission so lecturer and students receive OS pushes out of the box
+  ensureNotificationPermission(true);
+
   // If student scanned a QR link before logging in, auto-enroll & check-in immediately!
   if (state.pendingQrToken && state.user.role === 'STUDENT') {
     await performStudentCheckIn(state.pendingQrToken);
@@ -226,11 +355,37 @@ document.getElementById('registerForm').addEventListener('submit', (e) => {
 
 document.getElementById('btnEnableAlerts').addEventListener('click', async () => {
   playQuestionAlertChime();
-  if ('Notification' in window) {
-    const perm = await Notification.requestPermission();
-    alert(`Sound Chime initialized & OS Desktop Notifications permission: ${perm}`);
-  } else {
-    alert('Sound Chime initialized!');
+  const granted = await ensureNotificationPermission(false);
+  showInAppPushToast(
+    granted ? '🔔 OS Push Notifications Enabled!' : '🔊 Sound Chime Enabled',
+    granted
+      ? 'You will now receive OS Push Notifications whenever a student asks a question, even when you are outside the browser.'
+      : 'Audio chime initialized. Allow browser notifications in the address bar for OS-level push banners.',
+    'reply'
+  );
+  if (granted) {
+    triggerDesktopNotification(
+      '🎓 LiveClass AI — OS Push Active',
+      'You will see OS notifications here even when presenting slides outside the browser!'
+    );
+  }
+});
+
+document.getElementById('btnStudentEnablePush')?.addEventListener('click', async () => {
+  playQuestionAlertChime();
+  const granted = await ensureNotificationPermission(false);
+  showInAppPushToast(
+    granted ? '🔔 OS Push Alerts Enabled!' : '🔊 Sound Chime Enabled',
+    granted
+      ? 'You will receive an OS Push Notification as soon as the lecturer or a classmate replies to your question.'
+      : 'Allow browser notifications in the address bar to receive OS push alerts.',
+    'reply'
+  );
+  if (granted) {
+    triggerDesktopNotification(
+      '🎓 LiveClass AI — Student Push Active',
+      'You will receive an OS push notification as soon as your question gets a reply!'
+    );
   }
 });
 
@@ -370,6 +525,14 @@ document.querySelectorAll('.student-tab-btn').forEach((btn) => {
     document.querySelectorAll('.stu-tab-panel').forEach((p) => p.classList.remove('active'));
     btn.classList.add('active');
     document.getElementById(btn.dataset.stutab).classList.add('active');
+    if (btn.dataset.stutab === 'stu-qa') {
+      state.unreadStudentReplies = 0;
+      const badge = document.getElementById('studentQaBadge');
+      if (badge) {
+        badge.textContent = '0';
+        badge.classList.add('hidden');
+      }
+    }
   });
 });
 
@@ -388,10 +551,9 @@ async function loadAdminCourseData() {
     return;
   }
 
-  const [sesRes, histRes, qaRes, pollRes, sumRes, assignRes] = await Promise.all([
+  const [sesRes, histRes, pollRes, sumRes, assignRes] = await Promise.all([
     fetch(`/api/courses/${state.activeCourseId}/active-session`),
     fetch(`/api/courses/${state.activeCourseId}/attendance-history`),
-    fetch(`/api/courses/${state.activeCourseId}/questions`),
     fetch(`/api/courses/${state.activeCourseId}/poll?role=ADMIN`),
     fetch(`/api/courses/${state.activeCourseId}/summaries?role=ADMIN`),
     fetch(`/api/courses/${state.activeCourseId}/assignments`)
@@ -405,8 +567,7 @@ async function loadAdminCourseData() {
   populateStudentHistoryDropdown(histData.students);
   renderAttendanceHistoryMatrix(histData);
 
-  const qaData = await qaRes.json();
-  renderAdminQuestions(qaData.questions || []);
+  await loadAdminQuestionHistory();
 
   const pollData = await pollRes.json();
   state.activePoll = pollData.poll;
@@ -812,63 +973,237 @@ document.getElementById('btnExportHistoryCsv').addEventListener('click', () => {
   );
 });
 
-// --- 4.4 Feature 2: Live & Offline Q&A ---
-function renderAdminQuestions(questions) {
-  const unreadCount = questions.filter((q) => !q.is_dismissed && !q.lecturer_reply).length;
-  document.getElementById('adminQaBadge').textContent = unreadCount;
+// --- 4.4 Feature 2: Live & Offline Q&A + Lecturer Question History ---
+function buildQuestionHistoryQueryParams() {
+  const scope = document.getElementById('qaHistoryScopeFilter')?.value || 'COURSE';
+  const sessionId = document.getElementById('qaHistorySessionFilter')?.value || '';
+  const status = document.getElementById('qaHistoryStatusFilter')?.value || '';
+  const studentId = document.getElementById('qaHistoryStudentFilter')?.value || '';
+  const search = document.getElementById('qaHistorySearchInput')?.value.trim() || '';
+
+  const params = new URLSearchParams();
+  if (scope === 'ALL' && state.user) {
+    params.set('lecturerId', state.user.id);
+  } else if (state.activeCourseId) {
+    params.set('courseId', state.activeCourseId);
+  }
+  if (sessionId) params.set('sessionId', sessionId);
+  if (status) params.set('status', status);
+  if (studentId) params.set('studentId', studentId);
+  if (search) params.set('search', search);
+  return params;
+}
+
+async function loadAdminQuestionHistory() {
+  if (!state.user || state.user.role !== 'ADMIN') return;
+  const scope = document.getElementById('qaHistoryScopeFilter')?.value || 'COURSE';
+  if (scope === 'COURSE' && !state.activeCourseId) {
+    renderAdminQuestions([], { total: 0, pending_count: 0, replied_count: 0, verbal_count: 0, live_count: 0, offline_count: 0 });
+    return;
+  }
+
+  const params = buildQuestionHistoryQueryParams();
+  const res = await fetch(`/api/questions/history?${params.toString()}`);
+  const data = await res.json();
+
+  populateQaHistoryDropdowns(data.sessions || [], data.students || []);
+  renderAdminQuestions(data.questions || [], data.stats || {});
+}
+
+function populateQaHistoryDropdowns(sessions, students) {
+  const sesSelect = document.getElementById('qaHistorySessionFilter');
+  if (sesSelect) {
+    const currentSes = sesSelect.value;
+    sesSelect.innerHTML = `
+      <option value="">All Lectures &amp; Offline</option>
+      <option value="LIVE">🔴 Asked Live in Class Only</option>
+      <option value="OFFLINE">🌙 Asked Offline After Class Only</option>
+    `;
+    sessions.forEach((s) => {
+      const opt = document.createElement('option');
+      opt.value = String(s.id);
+      opt.textContent = `📅 ${s.title} (${(s.created_at || '').slice(0, 10)})`;
+      sesSelect.appendChild(opt);
+    });
+    if (Array.from(sesSelect.options).some((o) => o.value === String(currentSes))) {
+      sesSelect.value = currentSes;
+    }
+  }
+
+  const stuSelect = document.getElementById('qaHistoryStudentFilter');
+  if (stuSelect) {
+    const currentStu = stuSelect.value;
+    stuSelect.innerHTML = `
+      <option value="">All Students &amp; Anonymous</option>
+      <option value="ANONYMOUS">🕵️ Anonymous Questions Only</option>
+    `;
+    students.forEach((stu) => {
+      const opt = document.createElement('option');
+      opt.value = String(stu.id);
+      opt.textContent = `👩‍🎓 ${stu.name} (${stu.email})`;
+      stuSelect.appendChild(opt);
+    });
+    if (Array.from(stuSelect.options).some((o) => o.value === String(currentStu))) {
+      stuSelect.value = currentStu;
+    }
+  }
+}
+
+function formatStatusBadge(status) {
+  if (status === 'ANSWERED_WRITTEN') {
+    return '<span class="qa-status-pill ANSWERED_WRITTEN">💬 Answered in Writing</span>';
+  }
+  if (status === 'ANSWERED_VERBAL') {
+    return '<span class="qa-status-pill ANSWERED_VERBAL">✅ Answered Verbally</span>';
+  }
+  return '<span class="qa-status-pill PENDING">⏳ Pending Response</span>';
+}
+
+function renderRepliesThreadHtml(question) {
+  const replies = question.replies || [];
+  if (replies.length === 0) return '';
+  return `
+    <div class="qa-replies-thread">
+      ${replies
+        .map(
+          (r) => `
+          <div class="qa-reply-box ${r.author_role === 'STUDENT' ? 'student-reply' : ''}">
+            <div class="qa-reply-header">
+              <strong>${r.author_role === 'ADMIN' ? '👨‍🏫' : '👩‍🎓'} ${r.author_name} (${r.author_role === 'ADMIN' ? 'Lecturer' : 'Student'})</strong>
+              <span>${r.created_at || ''}</span>
+            </div>
+            <div>${r.content}</div>
+          </div>
+        `
+        )
+        .join('')}
+    </div>
+  `;
+}
+
+function renderAdminQuestions(questions, stats = null) {
+  const pendingCount =
+    stats && typeof stats.pending_count === 'number'
+      ? stats.pending_count
+      : questions.filter((q) => !q.is_dismissed && !q.lecturer_reply).length;
+  document.getElementById('adminQaBadge').textContent = pendingCount;
 
   const list = document.getElementById('adminQuestionsList');
   if (questions.length === 0) {
-    list.innerHTML = '<p class="card-desc">No questions submitted for this course yet.</p>';
+    list.innerHTML = '<p class="card-desc">No questions found matching the current history filters.</p>';
     return;
   }
 
   list.innerHTML = questions
     .map(
       (q) => `
-      <div class="qa-item ${!q.is_dismissed ? 'live-unread' : ''}">
+      <div class="qa-item ${q.status === 'PENDING' ? 'live-unread' : ''}" id="adminQuestionCard_${q.id}">
         <div class="qa-meta">
-          <span><strong>${q.display_author}</strong> • ${q.is_live ? '🔴 Asked LIVE in Class' : '🌙 Asked Offline After Class'} (${q.session_title || 'Course General'})</span>
-          <span>${q.created_at}</span>
+          <div class="qa-badges">
+            ${q.course_code ? `<span class="role-pill admin">${q.course_code}</span>` : ''}
+            <strong>${q.display_author}</strong>
+            <span>• ${q.is_live ? '🔴 Asked LIVE in Class' : '🌙 Asked Offline After Class'} (${q.session_title || 'General Course'})</span>
+            ${formatStatusBadge(q.status)}
+          </div>
+          <span>#${q.id} • ${q.created_at}</span>
         </div>
         <div class="qa-content">${q.content}</div>
-        ${q.lecturer_reply
-          ? `<div class="qa-reply-box"><strong>👨‍🏫 Lecturer Reply:</strong> ${q.lecturer_reply}</div>`
-          : `
-            <div class="qa-reply-form">
-              <input type="text" id="replyInput_${q.id}" placeholder="Type written reply (for offline questions or course archive)..." />
-              <button class="btn btn-sm btn-accent" onclick="sendLecturerReply(${q.id})">Send Reply</button>
-              ${!q.is_dismissed
+        ${renderRepliesThreadHtml(q)}
+        <div class="qa-reply-form">
+          <input type="text" id="replyInput_${q.id}" placeholder="${q.replies?.length ? 'Add another reply / follow-up (sends OS push to student)...' : 'Write a reply (sends OS push notification to the student who asked)...'}" />
+          <button class="btn btn-sm btn-accent" onclick="sendLecturerReply(${q.id})">💬 Send Reply (Push to Student)</button>
+          ${!q.is_dismissed
             ? `<button class="btn btn-sm btn-outline" onclick="dismissQuestion(${q.id})">✅ Answered Verbally (Dismiss)</button>`
             : ''
           }
-            </div>
-          `
-        }
+        </div>
       </div>
     `
     )
     .join('');
 }
 
+['qaHistoryScopeFilter', 'qaHistorySessionFilter', 'qaHistoryStatusFilter', 'qaHistoryStudentFilter'].forEach((id) => {
+  document.getElementById(id)?.addEventListener('change', () => {
+    loadAdminQuestionHistory();
+  });
+});
+
+document.getElementById('qaHistorySearchInput')?.addEventListener('input', () => {
+  loadAdminQuestionHistory();
+});
+
+document.getElementById('btnExportQuestionsCsv')?.addEventListener('click', () => {
+  const params = buildQuestionHistoryQueryParams();
+  window.open(`/api/questions/history-export.csv?${params.toString()}`, '_blank');
+});
+
 window.sendLecturerReply = async function (questionId) {
   const input = document.getElementById(`replyInput_${questionId}`);
-  const replyText = input.value.trim();
+  const replyText = input ? input.value.trim() : '';
   if (!replyText) return;
   await fetch(`/api/questions/${questionId}/reply`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ replyText })
+    body: JSON.stringify({
+      replyText,
+      userId: state.user?.id,
+      authorName: state.user?.name || 'Lecturer',
+      authorRole: state.user?.role || 'ADMIN'
+    })
   });
-  await loadAdminCourseData();
+  if (input) input.value = '';
+  await loadAdminQuestionHistory();
 };
+
+window.submitQuestionReply = async function (questionId, inputId) {
+  const input = document.getElementById(inputId);
+  const replyText = input ? input.value.trim() : '';
+  if (!replyText) return;
+  await fetch(`/api/questions/${questionId}/replies`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      replyText,
+      userId: state.user?.id,
+      authorName: state.user?.name,
+      authorRole: state.user?.role
+    })
+  });
+  if (input) input.value = '';
+  if (state.user?.role === 'ADMIN') {
+    await loadAdminQuestionHistory();
+  } else {
+    await loadStudentCourseData();
+  }
+};
+
+document.getElementById('btnReplyLiveQuestion')?.addEventListener('click', async () => {
+  const questionId = state.currentLiveModalQuestionId;
+  const input = document.getElementById('liveModalReplyInput');
+  const replyText = input ? input.value.trim() : '';
+  if (!questionId || !replyText) return;
+  await fetch(`/api/questions/${questionId}/reply`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      replyText,
+      userId: state.user?.id,
+      authorName: state.user?.name || 'Lecturer',
+      authorRole: 'ADMIN'
+    })
+  });
+  input.value = '';
+  document.getElementById('liveQuestionModal').classList.add('hidden');
+  await loadAdminQuestionHistory();
+});
 
 window.dismissQuestion = async function (questionId) {
   await fetch(`/api/questions/${questionId}/dismiss`, { method: 'PATCH' });
   if (state.currentLiveModalQuestionId === questionId) {
     document.getElementById('liveQuestionModal').classList.add('hidden');
   }
-  await loadAdminCourseData();
+  await loadAdminQuestionHistory();
 };
 
 document.getElementById('btnDismissLiveQuestion').addEventListener('click', async () => {
@@ -884,16 +1219,71 @@ document.getElementById('btnTestAudioChime').addEventListener('click', () => {
 });
 
 // --- 4.5 Feature 3: On-the-Spot Multiple-Choice KISS Polls ---
+function refreshPollOptionRowsUI() {
+  const container = document.getElementById('pollOptionsList');
+  if (!container) return;
+  const rows = Array.from(container.querySelectorAll('.poll-option-input-row'));
+  rows.forEach((row, idx) => {
+    const letter = String.fromCharCode(65 + idx);
+    const badge = row.querySelector('.poll-option-badge');
+    const input = row.querySelector('.poll-option-input');
+    const removeBtn = row.querySelector('.poll-option-remove-btn');
+    if (badge) badge.textContent = letter;
+    if (input) input.placeholder = `Option ${letter}`;
+    if (removeBtn) removeBtn.disabled = rows.length <= 2;
+  });
+}
+
+function addPollOptionInput(defaultValue = '', focusNew = false) {
+  const container = document.getElementById('pollOptionsList');
+  if (!container) return;
+  const idx = container.querySelectorAll('.poll-option-input-row').length;
+  const letter = String.fromCharCode(65 + idx);
+
+  const row = document.createElement('div');
+  row.className = 'poll-option-input-row';
+  row.innerHTML = `
+    <span class="poll-option-badge">${letter}</span>
+    <input type="text" class="poll-option-input" value="${defaultValue.replace(/"/g, '&quot;')}" placeholder="Option ${letter}" required />
+    <button type="button" class="poll-option-remove-btn" title="Remove option">&times;</button>
+  `;
+
+  row.querySelector('.poll-option-remove-btn').addEventListener('click', () => {
+    const total = container.querySelectorAll('.poll-option-input-row').length;
+    if (total <= 2) return;
+    row.remove();
+    refreshPollOptionRowsUI();
+  });
+
+  container.appendChild(row);
+  refreshPollOptionRowsUI();
+
+  if (focusNew) {
+    row.querySelector('.poll-option-input')?.focus();
+  }
+}
+
+function initPollOptionBuilder(initialOptions = ['Option A', 'Option B', 'Option C', 'Option D']) {
+  const container = document.getElementById('pollOptionsList');
+  if (!container) return;
+  container.innerHTML = '';
+  initialOptions.forEach((val) => addPollOptionInput(val, false));
+}
+
+document.getElementById('btnAddPollOption')?.addEventListener('click', () => {
+  addPollOptionInput('', true);
+});
+
+initPollOptionBuilder();
+
 document.getElementById('createPollForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const question = document.getElementById('pollQuestionInput').value.trim();
-  const options = document
-    .getElementById('pollOptionsInput')
-    .value.split('\n')
-    .map((o) => o.trim())
-    .filter(Boolean);
+  const optionInputs = Array.from(document.querySelectorAll('#pollOptionsList .poll-option-input'));
+  const options = optionInputs.map((input) => input.value.trim()).filter(Boolean);
+  const allowMultiple = Boolean(document.getElementById('pollAllowMultipleInput')?.checked);
 
-  if (options.length < 2) return alert('Please enter at least 2 options (one per line).');
+  if (options.length < 2) return alert('Please enter at least 2 options.');
 
   const res = await fetch('/api/polls', {
     method: 'POST',
@@ -902,7 +1292,8 @@ document.getElementById('createPollForm').addEventListener('submit', async (e) =
       courseId: state.activeCourseId,
       sessionId: state.activeSession?.id || null,
       question,
-      options
+      options,
+      allowMultiple
     })
   });
   const data = await res.json();
@@ -947,8 +1338,9 @@ function renderAdminPoll(poll) {
     }
       <div>
         <span class="status-badge ${poll.is_active ? 'live' : 'closed'}">${poll.is_active ? '🟢 LIVE POLL' : 'CLOSED'}</span>
+        <span class="status-badge closed" style="margin-left:6px">${poll.allow_multiple ? '☑️ Multiple Choice Allowed' : '🔘 Single Choice'}</span>
         <h4 class="mt-8">${poll.question}</h4>
-        <p class="card-desc">Total Student Votes: <strong>${poll.total_votes}</strong></p>
+        <p class="card-desc">Total Students Voted: <strong>${poll.total_votes}</strong></p>
       </div>
     </div>
     ${barsHtml}
@@ -1339,34 +1731,112 @@ document.getElementById('btnSimulateFirstQrScan').addEventListener('click', asyn
 });
 
 // Student Multiple-Choice Poll Voting (Confirmation only; results only on Lecturer Projector)
+state.studentPollSelections = {};
+
 function renderStudentPoll(poll) {
+  state.studentActivePoll = poll;
   const body = document.getElementById('studentPollBody');
   if (!poll || !poll.is_active) {
     body.innerHTML = '<p class="card-desc">No active poll right now. When the lecturer launches a poll, it will pop up here automatically!</p>';
     return;
   }
 
+  const submittedVotes = Array.isArray(poll.my_votes)
+    ? poll.my_votes
+    : poll.my_vote !== null && poll.my_vote !== undefined
+      ? [poll.my_vote]
+      : [];
+
+  if (poll.allow_multiple) {
+    if (!Array.isArray(state.studentPollSelections[poll.id])) {
+      state.studentPollSelections[poll.id] = [...submittedVotes];
+    }
+    const selectedSet = new Set(state.studentPollSelections[poll.id]);
+
+    const optionsHtml = poll.options
+      .map(
+        (opt, idx) => `
+        <button type="button" class="poll-option-btn ${selectedSet.has(idx) ? 'selected' : ''}"
+                onclick="toggleStudentMultiPollOption(${poll.id}, ${idx})">
+          <input type="checkbox" class="poll-option-check" ${selectedSet.has(idx) ? 'checked' : ''} tabindex="-1" />
+          <span><strong>${String.fromCharCode(65 + idx)}.</strong> ${opt}</span>
+          ${submittedVotes.includes(idx) ? '<span style="margin-left:auto">✅</span>' : ''}
+        </button>
+      `
+      )
+      .join('');
+
+    body.innerHTML = `
+      <div class="card-header" style="margin-bottom:6px">
+        <h4>${poll.question}</h4>
+        <span class="status-badge closed">☑️ Select one or more options</span>
+      </div>
+      <div class="student-poll-options">${optionsHtml}</div>
+      <button type="button" class="btn btn-primary btn-block mt-12" onclick="submitStudentMultiVote(${poll.id})">
+        🗳️ ${submittedVotes.length > 0 ? 'Update Vote' : 'Submit Vote'} (${selectedSet.size} selected)
+      </button>
+      ${submittedVotes.length > 0
+        ? `<div class="alert alert-success mt-12">✅ Your vote (${submittedVotes.map((i) => String.fromCharCode(65 + i)).join(', ')}) has been recorded! Live bar-chart results are displayed on the lecturer's projector screen.</div>`
+        : ''
+      }
+    `;
+    return;
+  }
+
   const optionsHtml = poll.options
     .map(
       (opt, idx) => `
-      <button class="poll-option-btn ${poll.my_vote === idx ? 'selected' : ''}"
+      <button type="button" class="poll-option-btn ${submittedVotes.includes(idx) ? 'selected' : ''}"
               onclick="submitStudentVote(${poll.id}, ${idx})">
-        <strong>${String.fromCharCode(65 + idx)}.</strong> ${opt}
-        ${poll.my_vote === idx ? ' ✅ (Your Vote)' : ''}
+        <span><strong>${String.fromCharCode(65 + idx)}.</strong> ${opt}</span>
+        ${submittedVotes.includes(idx) ? '<span style="margin-left:auto">✅ (Your Vote)</span>' : ''}
       </button>
     `
     )
     .join('');
 
   body.innerHTML = `
-    <h4>${poll.question}</h4>
+    <div class="card-header" style="margin-bottom:6px">
+      <h4>${poll.question}</h4>
+      <span class="status-badge closed">🔘 Select one option</span>
+    </div>
     <div class="student-poll-options">${optionsHtml}</div>
-    ${poll.my_vote !== null
+    ${submittedVotes.length > 0
       ? `<div class="alert alert-success mt-12">✅ Your vote has been recorded! Live bar-chart results are displayed on the lecturer's projector screen.</div>`
       : ''
     }
   `;
 }
+
+window.toggleStudentMultiPollOption = function (pollId, optionIndex) {
+  const current = Array.isArray(state.studentPollSelections[pollId])
+    ? [...state.studentPollSelections[pollId]]
+    : [];
+  const pos = current.indexOf(optionIndex);
+  if (pos >= 0) current.splice(pos, 1);
+  else current.push(optionIndex);
+  current.sort((a, b) => a - b);
+  state.studentPollSelections[pollId] = current;
+  if (state.studentActivePoll && state.studentActivePoll.id === pollId) {
+    renderStudentPoll(state.studentActivePoll);
+  }
+};
+
+window.submitStudentMultiVote = async function (pollId) {
+  const optionIndices = state.studentPollSelections[pollId] || [];
+  if (optionIndices.length === 0) {
+    return alert('Please select at least one option.');
+  }
+  const res = await fetch(`/api/polls/${pollId}/vote`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ studentId: state.user.id, optionIndices })
+  });
+  const data = await res.json();
+  if (data.error) return alert(data.error);
+  delete state.studentPollSelections[pollId];
+  await loadStudentCourseData();
+};
 
 window.submitStudentVote = async function (pollId, optionIndex) {
   const res = await fetch(`/api/polls/${pollId}/vote`, {
@@ -1382,6 +1852,9 @@ window.submitStudentVote = async function (pollId, optionIndex) {
 // Student Live & Offline Q&A
 document.getElementById('studentAskForm').addEventListener('submit', async (e) => {
   e.preventDefault();
+  // Request OS notification permission right inside the user submit gesture so student receives reply push!
+  ensureNotificationPermission(true);
+
   const content = document.getElementById('studentQuestionInput').value.trim();
   const isAnonymous = document.getElementById('studentAnonCheckbox').checked;
 
@@ -1407,21 +1880,31 @@ function renderStudentQuestions(questions) {
     return;
   }
   feed.innerHTML = questions
-    .map(
-      (q) => `
-      <div class="qa-item">
+    .map((q) => {
+      const isMine = state.user && q.student_id === state.user.id;
+      return `
+      <div class="qa-item ${isMine ? 'my-question' : ''}" id="stuQuestionCard_${q.id}">
         <div class="qa-meta">
-          <span><strong>${q.display_author}</strong> • ${q.is_live ? '🔴 Live Class Question' : '🌙 Post-Class Offline Question'}</span>
+          <div class="qa-badges">
+            <strong>${q.display_author}${isMine ? ' (You)' : ''}</strong>
+            <span>• ${q.is_live ? '🔴 Live Class Question' : '🌙 Post-Class Offline Question'}</span>
+            ${formatStatusBadge(q.status)}
+          </div>
           <span>${q.created_at}</span>
         </div>
         <div class="qa-content">${q.content}</div>
-        ${q.lecturer_reply
-          ? `<div class="qa-reply-box"><strong>👨‍🏫 Lecturer Answer:</strong> ${q.lecturer_reply}</div>`
-          : `<small class="card-desc">${q.is_dismissed ? '✅ Answered verbally by lecturer in class' : '⏳ Waiting for lecturer response'}</small>`
+        ${renderRepliesThreadHtml(q)}
+        ${!q.replies?.length && !q.lecturer_reply
+          ? `<small class="card-desc">${q.is_dismissed ? '✅ Answered verbally by lecturer in class' : '⏳ Waiting for lecturer response'}</small>`
+          : ''
         }
+        <div class="qa-reply-form">
+          <input type="text" id="stuReplyInput_${q.id}" placeholder="Write a comment or reply to this question..." />
+          <button type="button" class="btn btn-sm btn-outline" onclick="submitQuestionReply(${q.id}, 'stuReplyInput_${q.id}')">💬 Reply</button>
+        </div>
       </div>
-    `
-    )
+    `;
+    })
     .join('');
 }
 
@@ -1585,30 +2068,133 @@ socket.on('photo:audited', (session) => {
 });
 
 socket.on('question:new', (question) => {
-  if (!state.user || question.course_id !== state.activeCourseId) return;
+  if (!state.user) return;
   if (state.user.role === 'ADMIN') {
-    loadAdminCourseData();
-    // If question was asked LIVE during class, play chime, fire OS notification, and pop up on Projector!
-    if (question.is_live) {
-      playQuestionAlertChime();
-      triggerDesktopNotification(
-        `✋ New Live Question (${question.display_author})`,
-        question.content
-      );
-      state.currentLiveModalQuestionId = question.id;
-      document.getElementById('liveModalAuthor').textContent = question.display_author;
-      document.getElementById('liveModalContent').textContent = question.content;
-      document.getElementById('liveQuestionModal').classList.remove('hidden');
+    loadAdminQuestionHistory();
+
+    // Always alert the Lecturer via OS Push Notification + Sound + Visual Toast + Popup Modal,
+    // whether the question is Live or Offline, and even if the Lecturer is outside the site!
+    const courseLabel = question.course_code ? `[${question.course_code}] ` : '';
+    const modeLabel = question.is_live ? '🔴 Live Question' : '🌙 Post-Class Question';
+    playQuestionAlertChime();
+    triggerDesktopNotification(
+      `✋ ${courseLabel}${modeLabel} (${question.display_author})`,
+      question.content,
+      {
+        courseId: question.course_id,
+        questionId: question.id,
+        tag: `question-new-${question.id}`,
+        onClick: () => {
+          document.querySelector('.tab-btn[data-tab="admin-qa"]')?.click();
+        }
+      }
+    );
+    showInAppPushToast(
+      `✋ ${courseLabel}New Question from ${question.display_author}`,
+      question.content,
+      'urgent',
+      () => {
+        document.querySelector('.tab-btn[data-tab="admin-qa"]')?.click();
+      }
+    );
+
+    state.currentLiveModalQuestionId = question.id;
+    const titleEl = document.getElementById('liveModalTitle');
+    if (titleEl) titleEl.textContent = question.is_live ? '✋ Live Classroom Question' : '💬 New Student Question';
+    const metaEl = document.getElementById('liveModalCourseMeta');
+    if (metaEl) {
+      metaEl.textContent = `${question.course_code || ''} ${question.course_name || ''} • ${question.session_title || 'General'}`;
     }
-  } else {
+    document.getElementById('liveModalAuthor').textContent = question.display_author;
+    document.getElementById('liveModalContent').textContent = question.content;
+    const replyInput = document.getElementById('liveModalReplyInput');
+    if (replyInput) replyInput.value = '';
+    document.getElementById('liveQuestionModal').classList.remove('hidden');
+  } else if (question.course_id === state.activeCourseId) {
     loadStudentCourseData();
   }
 });
 
+socket.on('question:replied', (payload) => {
+  if (!state.user || !payload || !payload.question) return;
+  const { question, reply, target_student_id, replier_id } = payload;
+
+  // Refresh the question feed on screen
+  if (state.user.role === 'ADMIN') {
+    loadAdminQuestionHistory();
+  } else if (question.course_id === state.activeCourseId) {
+    loadStudentCourseData();
+  }
+
+  // Send OS Push Notification & Visual Alert to the Student who asked the question!
+  if (state.user.id === Number(target_student_id) && state.user.id !== Number(replier_id)) {
+    const courseLabel = question.course_code ? `[${question.course_code}] ` : '';
+    const authorLabel = reply?.author_name || 'Lecturer';
+    const replyContent = reply?.content || question.lecturer_reply || '';
+
+    playQuestionAlertChime();
+    triggerDesktopNotification(
+      `💬 ${courseLabel}New Reply to Your Question (${authorLabel})`,
+      `${replyContent}\n— Question: "${question.content}"`,
+      {
+        courseId: question.course_id,
+        questionId: question.id,
+        tag: `question-reply-${question.id}-${Date.now()}`,
+        onClick: () => {
+          document.querySelector('.student-tab-btn[data-stutab="stu-qa"]')?.click();
+        }
+      }
+    );
+
+    showInAppPushToast(
+      `💬 ${courseLabel}${authorLabel} replied to your question!`,
+      `"${replyContent}"`,
+      'reply',
+      async () => {
+        if (state.activeCourseId !== question.course_id) {
+          await window.selectStudentCourse(question.course_id);
+        }
+        document.querySelector('.student-tab-btn[data-stutab="stu-qa"]')?.click();
+      }
+    );
+
+    const stuQaPanel = document.getElementById('stu-qa');
+    if (!stuQaPanel || !stuQaPanel.classList.contains('active')) {
+      state.unreadStudentReplies = (state.unreadStudentReplies || 0) + 1;
+      const badge = document.getElementById('studentQaBadge');
+      if (badge) {
+        badge.textContent = String(state.unreadStudentReplies);
+        badge.classList.remove('hidden');
+      }
+    }
+  } else if (state.user.role === 'ADMIN' && state.user.id !== Number(replier_id)) {
+    // Also notify the lecturer if a student adds a follow-up reply on a question
+    const courseLabel = question.course_code ? `[${question.course_code}] ` : '';
+    playQuestionAlertChime();
+    triggerDesktopNotification(
+      `💬 ${courseLabel}New Follow-up Reply (${reply?.author_name || 'Student'})`,
+      `${reply?.content || ''}\n— On: "${question.content}"`,
+      {
+        courseId: question.course_id,
+        questionId: question.id,
+        tag: `question-reply-admin-${question.id}-${Date.now()}`
+      }
+    );
+    showInAppPushToast(
+      `💬 ${courseLabel}New Reply from ${reply?.author_name || 'Student'}`,
+      reply?.content || '',
+      'reply',
+      () => {
+        document.querySelector('.tab-btn[data-tab="admin-qa"]')?.click();
+      }
+    );
+  }
+});
+
 socket.on('question:updated', (question) => {
-  if (!state.user || question.course_id !== state.activeCourseId) return;
-  if (state.user.role === 'ADMIN') loadAdminCourseData();
-  else loadStudentCourseData();
+  if (!state.user) return;
+  if (state.user.role === 'ADMIN') loadAdminQuestionHistory();
+  else if (question.course_id === state.activeCourseId) loadStudentCourseData();
 });
 
 socket.on('poll:started', (payload) => {
